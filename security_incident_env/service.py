@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -34,8 +35,10 @@ def health() -> dict[str, str]:
 
 
 @app.post("/reset", response_model=ResetResponse)
-def reset_environment(request: ResetRequest) -> ResetResponse:
+def reset_environment(request: Optional[ResetRequest] = None) -> ResetResponse:
     """Create a new environment session and return the initial observation."""
+    if request is None:
+        request = ResetRequest()
     env = SecurityIncidentResponseEnv()
     observation = env.reset(request.task_name)
     session_id = str(uuid4())
