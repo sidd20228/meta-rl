@@ -1,0 +1,130 @@
+spec_version: 1
+name: security-incident-response
+type: space
+runtime: fastapi
+app: server.app:app
+port: 7860
+
+metadata:
+  name: security-incident-response
+  version: 1.1.0
+  description: Seeded, partially observable SOC incident response environment with branching attack paths, budgeted actions, and trajectory-aware grading.
+  domain: cybersecurity
+  author: OpenAI Codex
+
+environment:
+  class_name: security_incident_env.environment.SecurityIncidentResponseEnv
+  api_style: gymnasium
+  methods:
+    - reset
+    - step
+    - state
+    - grade
+    - close
+  endpoints:
+    reset: /reset
+    step: /step
+    health: /health
+
+tasks:
+  - name: easy
+    goal: Detect and contain an obvious privileged authentication attack hidden among benign SaaS activity and a travel-related false positive.
+    max_steps: 6
+  - name: medium
+    goal: Correlate reconnaissance with either SQL injection or credential stuffing while ignoring benign travel and QA noise.
+    max_steps: 8
+  - name: hard
+    goal: Solve a three-stage branched attack with misleading alerts, persistence indicators, and required escalation.
+    max_steps: 8
+
+action_schema:
+  type: object
+  required:
+    - action_type
+  properties:
+    action_type:
+      type: string
+      enum:
+        - analyze_log
+        - flag_alert
+        - block_ip
+        - escalate
+        - ignore
+    log_id:
+      type: string
+      nullable: true
+    ip_address:
+      type: string
+      nullable: true
+    alert_id:
+      type: string
+      nullable: true
+
+observation_schema:
+  type: object
+  properties:
+    current_logs:
+      type: array
+      items:
+        type: object
+        properties:
+          log_id: { type: string }
+          timestamp: { type: string }
+          source_ip: { type: string }
+          event_type: { type: string }
+          severity: { type: string }
+          message: { type: string }
+    active_alerts:
+      type: array
+      items:
+        type: object
+    blocked_ips:
+      type: array
+      items:
+        type: string
+    remaining_budget:
+      type: integer
+    max_budget:
+      type: integer
+    step_count:
+      type: integer
+    previous_action_feedback:
+      type: string
+    visible_history_count:
+      type: integer
+    log_window_size:
+      type: integer
+    context_truncated:
+      type: boolean
+
+state_schema:
+  type: object
+  properties:
+    full_log_history:
+      type: array
+    remaining_log_queue:
+      type: array
+    malicious_log_ids:
+      type: array
+    attack_progression_stage:
+      type: string
+    steps_taken:
+      type: integer
+    incident_resolved:
+      type: boolean
+    false_positive_blocks:
+      type: array
+    decoy_ips:
+      type: array
+    max_budget:
+      type: integer
+    remaining_budget:
+      type: integer
+    budget_exhausted:
+      type: boolean
+    evidence_groups:
+      type: array
+    timeliness_penalty:
+      type: number
+    score_cap:
+      type: number

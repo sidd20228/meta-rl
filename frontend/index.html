@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Security Incident Response Demo</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Security Incident Response Environment</p>
+          <h1>Manual SOC Analyst Console</h1>
+        </div>
+        <div class="session-strip card">
+          <span id="session-status">No active session</span>
+          <span id="session-meta">Reset an environment to begin.</span>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="left-column">
+          <article class="card panel">
+            <div class="panel-header">
+              <h2>Current Logs</h2>
+              <span id="window-meta" class="panel-meta">Window: -</span>
+            </div>
+            <div id="logs-list" class="stack"></div>
+          </article>
+
+          <article class="card panel">
+            <div class="panel-header">
+              <h2>Active Alerts</h2>
+              <span id="blocked-meta" class="panel-meta">Blocked IPs: none</span>
+            </div>
+            <div id="alerts-list" class="stack"></div>
+          </article>
+        </section>
+
+        <aside class="right-column">
+          <article class="card panel">
+            <div class="panel-header">
+              <h2>Reset Environment</h2>
+            </div>
+            <label class="field">
+              <span>Task</span>
+              <select id="task-select">
+                <option value="easy">easy</option>
+                <option value="medium">medium</option>
+                <option value="hard">hard</option>
+              </select>
+            </label>
+            <button id="reset-button" class="button button-primary">Reset</button>
+          </article>
+
+          <article class="card panel">
+            <div class="panel-header">
+              <h2>Take Action</h2>
+              <span class="panel-meta">Costs: analyze 1, flag 1, block 2, escalate 2, ignore 0</span>
+            </div>
+            <label class="field">
+              <span>Action Type</span>
+              <select id="action-type">
+                <option value="analyze_log">analyze_log</option>
+                <option value="flag_alert">flag_alert</option>
+                <option value="block_ip">block_ip</option>
+                <option value="escalate">escalate</option>
+                <option value="ignore">ignore</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Log ID</span>
+              <input id="log-id" type="text" placeholder="L300" />
+            </label>
+            <label class="field">
+              <span>Alert ID</span>
+              <input id="alert-id" type="text" placeholder="A301" />
+            </label>
+            <label class="field">
+              <span>IP Address</span>
+              <input id="ip-address" type="text" placeholder="203.0.113.200" />
+            </label>
+            <button id="step-button" class="button button-primary" disabled>Step</button>
+          </article>
+
+          <article class="card panel">
+            <div class="panel-header">
+              <h2>Episode Status</h2>
+            </div>
+            <div class="summary-grid">
+              <div class="summary-item">
+                <span class="summary-label">Budget</span>
+                <strong id="budget-meta">-</strong>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Reward</span>
+                <strong id="reward-meta">-</strong>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Done</span>
+                <strong id="done-meta">-</strong>
+              </div>
+              <div class="summary-item">
+                <span class="summary-label">Score</span>
+                <strong id="score-meta">-</strong>
+              </div>
+            </div>
+            <div id="feedback-box" class="feedback">Reset an environment to inspect the first observation.</div>
+            <div id="judge-box" class="feedback">
+              <strong>Judge:</strong>
+              <span id="judge-summary">No semantic judgment yet.</span>
+              <div id="judge-phase-breakdown" class="judge-breakdown"></div>
+            </div>
+            <div id="final-summary" class="final-summary hidden"></div>
+          </article>
+        </aside>
+      </main>
+
+      <section class="card panel history-panel">
+        <div class="panel-header">
+          <h2>Action History</h2>
+        </div>
+        <div id="history-list" class="stack"></div>
+      </section>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
