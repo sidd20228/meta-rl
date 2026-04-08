@@ -1,3 +1,13 @@
+---
+title: Security Incident Response
+emoji: 🛡️
+colorFrom: blue
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Security Incident Response Environment
 
 This project implements a deterministic but seeded OpenEnv environment where an agent acts as a SOC analyst responding to security incidents. It models realistic analyst workflows such as inspecting noisy log streams, correlating alerts, blocking malicious infrastructure, and escalating confirmed incidents. The environment is designed for reproducible benchmarking, Docker deployment, and Hugging Face Spaces hosting.
