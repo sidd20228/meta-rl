@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "security-incident-response-openenv"
+version = "1.1.0"
+description = "Seeded security incident response environment for OpenEnv."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.8",
+  "openenv-core>=0.2.0",
+  "openai>=1.75.0",
+  "pydantic>=2.11.3",
+  "PyYAML>=6.0.2",
+  "uvicorn>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.5",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[tool.setuptools.packages.find]
+include = ["security_incident_env", "security_incident_env.*", "server", "server.*"]
