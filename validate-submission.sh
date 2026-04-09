@@ -10,7 +10,11 @@
 #   - curl (usually pre-installed)
 #
 # Run:
-#   ./validate-submission.sh <ping_url> [repo_dir]
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/validate-submission.sh | bash -s -- <ping_url> [repo_dir]
+#
+#   Or download and run locally:
+#     chmod +x validate-submission.sh
+#     ./validate-submission.sh <ping_url> [repo_dir]
 #
 # Arguments:
 #   ping_url   Your HuggingFace Space URL (e.g. https://your-space.hf.space)
@@ -153,21 +157,14 @@ fi
 
 log "${BOLD}Step 3/3: Running openenv validate${NC} ..."
 
-OPENENV_BIN=""
-if command -v openenv &>/dev/null; then
-  OPENENV_BIN="$(command -v openenv)"
-elif [ -x "$REPO_DIR/.venv/bin/openenv" ]; then
-  OPENENV_BIN="$REPO_DIR/.venv/bin/openenv"
-fi
-
-if [ -z "$OPENENV_BIN" ]; then
+if ! command -v openenv &>/dev/null; then
   fail "openenv command not found"
-  hint "Install it: pip install openenv-core, or use the repo .venv"
+  hint "Install it: pip install openenv-core"
   stop_at "Step 3"
 fi
 
 VALIDATE_OK=false
-VALIDATE_OUTPUT=$(cd "$REPO_DIR" && "$OPENENV_BIN" validate 2>&1) && VALIDATE_OK=true
+VALIDATE_OUTPUT=$(cd "$REPO_DIR" && openenv validate 2>&1) && VALIDATE_OK=true
 
 if [ "$VALIDATE_OK" = true ]; then
   pass "openenv validate passed"

@@ -236,9 +236,11 @@ def build_openai_policy() -> Callable[[TaskName, object], Action]:
     model_name = os.getenv("MODEL_NAME")
     api_key = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
     if not model_name:
-        raise RuntimeError("MODEL_NAME is required.")
+        print("WARNING: MODEL_NAME not set, falling back to heuristic policy.")
+        return build_heuristic_policy()
     if not api_key:
-        raise RuntimeError("HF_TOKEN or OPENAI_API_KEY is required.")
+        print("WARNING: HF_TOKEN/OPENAI_API_KEY not set, falling back to heuristic policy.")
+        return build_heuristic_policy()
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
 
@@ -345,7 +347,9 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
         score = env.grade().score
         steps_taken = env.state().steps_taken
         exit_code = 0 if success else 1
-    except Exception:
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
         exit_code = 1
     finally:
         try:
