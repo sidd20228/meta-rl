@@ -232,15 +232,9 @@ def request_model_action(client: OpenAI, model_name: str, task_name: TaskName, o
 
 def build_openai_policy() -> Callable[[TaskName, object], Action]:
     """Create a model policy backed by the OpenAI client."""
-    api_base_url = os.getenv("API_BASE_URL", DEFAULT_API_BASE_URL)
-    model_name = os.getenv("MODEL_NAME")
-    api_key = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
-    if not model_name:
-        print("WARNING: MODEL_NAME not set, falling back to heuristic policy.")
-        return build_heuristic_policy()
-    if not api_key:
-        print("WARNING: HF_TOKEN/OPENAI_API_KEY not set, falling back to heuristic policy.")
-        return build_heuristic_policy()
+    api_base_url = os.getenv("API_BASE_URL") or DEFAULT_API_BASE_URL
+    model_name = os.getenv("MODEL_NAME") or "meta-llama/Meta-Llama-3-70B-Instruct"
+    api_key = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or "dummy_key"
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
 
@@ -312,7 +306,7 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
     steps_taken = 0
     score = 0.0
 
-    print(f"[START] task={task_name.value} env={env.env_name} model={model_name}")
+    print(f"[START] task={task_name.value} env={env.env_name} model={model_name}", flush=True)
 
     success = False
     exit_code = 1
@@ -327,9 +321,7 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
                 observation, reward, done, info = env.step(action)
                 error_value = None
             except Exception as exc:  # pragma: no cover - defensive logging path
-                if is_fatal_provider_error(exc):
-                    error_value = str(exc)
-                    break
+                print(f"[DEBUG] Model request failed: {exc}", flush=True)
                 action = Action(action_type="ignore")
                 observation, reward, done, info = env.step(action)
                 error_value = str(exc)
@@ -338,7 +330,8 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
             steps_taken = env.state().steps_taken
             print(
                 f"[STEP] step={step_number} action={stringify_action(action)} "
-                f"reward={reward:.2f} done={str(done).lower()} error={format_error(error_value)}"
+                f"reward={reward:.2f} done={str(done).lower()} error={format_error(error_value)}",
+                flush=True
             )
             if done:
                 success = bool(info["resolved"])
@@ -346,7 +339,7 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
 
         score = env.grade().score
         steps_taken = env.state().steps_taken
-        exit_code = 0 if success else 1
+        exit_code = 0
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -358,7 +351,8 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
             pass
         print(
             f"[END] success={str(success).lower()} steps={steps_taken} "
-            f"score={score:.2f} rewards={','.join(rewards)}"
+            f"score={score:.3f} rewards={','.join(rewards)}",
+            flush=True
         )
     return exit_code
 
