@@ -30,12 +30,15 @@ tasks:
   - name: easy
     goal: Detect and contain an obvious privileged authentication attack hidden among benign SaaS activity and a travel-related false positive.
     max_steps: 6
+    grader: "security_incident_env.graders:grade_episode"
   - name: medium
     goal: Correlate reconnaissance with either SQL injection or credential stuffing while ignoring benign travel and QA noise.
     max_steps: 8
+    grader: "security_incident_env.graders:grade_episode"
   - name: hard
     goal: Solve a three-stage branched attack with misleading alerts, persistence indicators, and required escalation.
     max_steps: 8
+    grader: "security_incident_env.graders:grade_episode"
 
 action_schema:
   type: object
