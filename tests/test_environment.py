@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import re
+import subprocess
+import sys
 import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from inference import sanitize_action
 from security_incident_env.environment import SecurityIncidentResponseEnv
@@ -220,6 +228,31 @@ class EnvironmentDeterminismTests(unittest.TestCase):
 
         self.assertEqual(sanitized.action_type.value, "analyze_log")
         self.assertEqual(sanitized.log_id, "L100")
+
+    def test_inference_default_emits_all_three_task_episodes(self) -> None:
+        result = subprocess.run(
+            [sys.executable, "inference.py", "--policy", "heuristic"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+        lines = [line for line in result.stdout.splitlines() if line]
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith(("[START]", "[STEP]", "[END]")) for line in lines))
+        self.assertNotIn("[DEBUG]", result.stdout)
+
+        start_lines = [line for line in lines if line.startswith("[START]")]
+        end_lines = [line for line in lines if line.startswith("[END]")]
+        self.assertEqual([re.search(r"task=([^ ]+)", line).group(1) for line in start_lines], ["easy", "medium", "hard"])
+        self.assertEqual(len(end_lines), 3)
+        for line in end_lines:
+            score_match = re.search(r"score=([0-9.]+)", line)
+            self.assertIsNotNone(score_match)
+            score = float(score_match.group(1))
+            self.assertGreaterEqual(score, 0.0)
+            self.assertLessEqual(score, 1.0)
 
 
 if __name__ == "__main__":

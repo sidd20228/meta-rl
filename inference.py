@@ -31,6 +31,7 @@ Rules:
 
 DEFAULT_API_BASE_URL = "https://router.huggingface.co/v1"
 DEFAULT_MODEL_MAX_TOKENS = int(os.getenv("OPENENV_MODEL_MAX_TOKENS", "128"))
+ALL_TASKS = "all"
 
 
 def observation_to_prompt(task_name: TaskName, observation) -> str:
@@ -234,7 +235,7 @@ def build_openai_policy() -> Callable[[TaskName, object], Action]:
     """Create a model policy backed by the OpenAI client."""
     api_base_url = os.getenv("API_BASE_URL") or DEFAULT_API_BASE_URL
     model_name = os.getenv("MODEL_NAME") or "meta-llama/Meta-Llama-3-70B-Instruct"
-    api_key = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY") or "dummy_key"
+    api_key = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or "dummy_key"
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
 
@@ -246,39 +247,56 @@ def build_openai_policy() -> Callable[[TaskName, object], Action]:
 
 def build_heuristic_policy() -> Callable[[TaskName, object], Action]:
     """Deterministic fallback policy useful for local smoke tests."""
+    analyzed_by_task: dict[TaskName, set[str]] = {task_name: set() for task_name in TaskName}
 
     def policy(task_name: TaskName, observation) -> Action:
         blocked = set(observation.blocked_ips)
+        visible_logs = {log.log_id for log in observation.current_logs}
+        visible_alerts = {alert.alert_id: alert for alert in observation.active_alerts}
         step = observation.step_count
+        if step == 0:
+            analyzed_by_task[task_name].clear()
+
+        def analyze(log_id: str) -> Action:
+            analyzed_by_task[task_name].add(log_id)
+            return Action(action_type="analyze_log", log_id=log_id)
 
         if task_name == TaskName.EASY:
-            if step == 0:
-                return Action(action_type="analyze_log", log_id="L100")
-            if step == 1:
+            if step == 0 and "L100" in visible_logs:
+                return analyze("L100")
+            if step == 1 and "L101" in visible_logs:
+                return analyze("L101")
+            if "A100" in visible_alerts and visible_alerts["A100"].status != "flagged":
                 return Action(action_type="flag_alert", alert_id="A100")
             if "198.51.100.24" not in blocked:
                 return Action(action_type="block_ip", ip_address="198.51.100.24")
             return Action(action_type="ignore")
 
         if task_name == TaskName.MEDIUM:
-            if step == 0:
-                return Action(action_type="analyze_log", log_id="L200")
-            if step == 1:
-                return Action(action_type="analyze_log", log_id="L201")
-            if step == 2:
+            if step == 0 and "L200" in visible_logs:
+                return analyze("L200")
+            if step <= 2 and "L201" in visible_logs and "L201" not in analyzed_by_task[task_name]:
+                return analyze("L201")
+            if step <= 2 and "A200" not in visible_alerts:
+                return Action(action_type="ignore")
+            if "A200" in visible_alerts and visible_alerts["A200"].status != "flagged":
                 return Action(action_type="flag_alert", alert_id="A200")
+            if "A200" not in visible_alerts:
+                return Action(action_type="ignore")
             if "203.0.113.77" not in blocked:
                 return Action(action_type="block_ip", ip_address="203.0.113.77")
             return Action(action_type="ignore")
 
-        if step == 0:
-            return Action(action_type="analyze_log", log_id="L300")
-        if step == 1:
-            return Action(action_type="analyze_log", log_id="L301")
-        if step == 2:
-            return Action(action_type="analyze_log", log_id="L302")
-        if step == 3:
+        if step == 0 and "L300" in visible_logs:
+            return analyze("L300")
+        if step <= 2 and "L302" in visible_logs and "L302" not in analyzed_by_task[task_name]:
+            return analyze("L302")
+        if step <= 2 and "A301" not in visible_alerts:
+            return Action(action_type="ignore")
+        if "A301" in visible_alerts and visible_alerts["A301"].status != "flagged":
             return Action(action_type="flag_alert", alert_id="A301")
+        if "A301" not in visible_alerts:
+            return Action(action_type="ignore")
         if "203.0.113.200" not in blocked:
             return Action(action_type="block_ip", ip_address="203.0.113.200")
         return Action(action_type="escalate")
@@ -321,7 +339,6 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
                 observation, reward, done, info = env.step(action)
                 error_value = None
             except Exception as exc:  # pragma: no cover - defensive logging path
-                print(f"[DEBUG] Model request failed: {exc}", flush=True)
                 action = Action(action_type="ignore")
                 observation, reward, done, info = env.step(action)
                 error_value = str(exc)
@@ -357,10 +374,29 @@ def run_episode(task_name: TaskName, use_heuristic: bool = False) -> int:
     return exit_code
 
 
+def resolve_tasks(task_selection: str) -> list[TaskName]:
+    """Resolve the CLI task selection into one or more task episodes."""
+    if task_selection == ALL_TASKS:
+        return list(TaskName)
+    return [TaskName(task_selection)]
+
+
+def _default_task_selection() -> str:
+    """Read the optional task override while keeping all tasks as the default."""
+    selection = os.getenv("OPENENV_TASK", ALL_TASKS).strip().lower() or ALL_TASKS
+    choices = {ALL_TASKS, *(task.value for task in TaskName)}
+    return selection if selection in choices else ALL_TASKS
+
+
 def main() -> int:
-    """CLI entrypoint for single-task inference."""
+    """CLI entrypoint for submission inference."""
     parser = argparse.ArgumentParser(description="Run inference against the OpenEnv security incident environment.")
-    parser.add_argument("--task", choices=[task.value for task in TaskName], default=TaskName.EASY.value)
+    parser.add_argument(
+        "--task",
+        choices=[ALL_TASKS, *(task.value for task in TaskName)],
+        default=_default_task_selection(),
+        help="Run one task or all declared tasks. Defaults to all.",
+    )
     parser.add_argument(
         "--policy",
         choices=["openai", "heuristic"],
@@ -368,7 +404,13 @@ def main() -> int:
         help="Use the OpenAI client or a local heuristic smoke-test policy.",
     )
     args = parser.parse_args()
-    return run_episode(TaskName(args.task), use_heuristic=args.policy == "heuristic")
+
+    exit_code = 0
+    for task_name in resolve_tasks(args.task):
+        episode_exit_code = run_episode(task_name, use_heuristic=args.policy == "heuristic")
+        if episode_exit_code != 0:
+            exit_code = episode_exit_code
+    return exit_code
 
 
 if __name__ == "__main__":
