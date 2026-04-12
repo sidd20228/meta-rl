@@ -221,6 +221,7 @@ def _ground_truth_summary(state: State) -> dict[str, object]:
         "required_alert_ids": state.required_alert_ids,
         "required_block_ips": state.required_block_ips,
         "requires_escalation": state.requires_escalation,
+        "requires_report": state.requires_report,
         "evidence_groups": state.evidence_groups,
         "decoy_ips": state.decoy_ips,
         "decoy_log_ids": state.decoy_log_ids,

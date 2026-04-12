@@ -92,6 +92,18 @@ def _signal_score(text: str) -> int:
         "burst",
         "replay",
         "success",
+        "enumerated",
+        "probed",
+        "payload",
+        "malformed",
+        "privileged_api",
+        "follow-on",
+        "staged",
+        "export",
+        "identity",
+        "gateway",
+        "recovery",
+        "service account",
     )
     negative = (
         "travel",
@@ -104,6 +116,15 @@ def _signal_score(text: str) -> int:
         "drill",
         "staging",
         "benign",
+        "validation",
+        "scanner",
+        "replayed",
+        "archived",
+        "ticketed",
+        "exercise",
+        "vendor appliance",
+        "mirrors",
+        "mirror",
     )
     return sum(2 for token in positive if token in text) - sum(2 for token in negative if token in text)
 
@@ -114,8 +135,8 @@ def _best_log(observation: Observation) -> Optional[LogEntry]:
     return max(
         observation.current_logs,
         key=lambda log: (
-            _severity_rank(log.severity.value),
             _signal_score(f"{log.event_type} {log.message}"),
+            _severity_rank(log.severity.value),
             log.log_id,
         ),
     )
@@ -127,8 +148,8 @@ def _best_alert(observation: Observation) -> Optional[Alert]:
     return max(
         observation.active_alerts,
         key=lambda alert: (
-            _severity_rank(alert.severity.value),
             _signal_score(f"{alert.name} {alert.summary}"),
+            _severity_rank(alert.severity.value),
             alert.alert_id,
         ),
     )
@@ -142,6 +163,32 @@ def _best_block_ip(observation: Observation) -> Optional[str]:
     if candidate_log and candidate_log.source_ip not in observation.blocked_ips:
         return candidate_log.source_ip
     return None
+
+
+def _best_unanalyzed_log(observation: Observation, analyzed_log_ids: set[str]) -> Optional[LogEntry]:
+    candidates = [log for log in observation.current_logs if log.log_id not in analyzed_log_ids]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda log: (
+            _signal_score(f"{log.event_type} {log.message}"),
+            _severity_rank(log.severity.value),
+            log.log_id,
+        ),
+    )
+
+
+def _build_report(task_name: TaskName, observation: Observation, analyzed_log_ids: set[str]) -> str:
+    alert = _best_alert(observation)
+    ip_address = observation.blocked_ips[-1] if observation.blocked_ips else (_best_block_ip(observation) or (alert.source_ip if alert else "unknown"))
+    evidence = sorted(analyzed_log_ids) or [log.log_id for log in observation.current_logs[:3]]
+    alert_id = alert.alert_id if alert else "unflagged"
+    escalation = " Escalate because this is a multi-stage hard incident." if task_name == TaskName.HARD else ""
+    return (
+        f"Attacker {ip_address} is tied to evidence {', '.join(evidence)}. "
+        f"Alert {alert_id} was correlated and the attacker should be contained by block or isolation.{escalation}"
+    )
 
 
 def sanitize_action(
@@ -227,35 +274,27 @@ def _task_workflow_guardrail(
     alerts_by_id: dict[str, Alert],
     analyzed_log_ids: set[str],
 ) -> Action | None:
-    """Keep local/provider policies on the visible task workflow once enough context is exposed."""
-    targets = {
-        TaskName.EASY: ("A100", "198.51.100.24", 2),
-        TaskName.MEDIUM: ("A200", "203.0.113.77", 3),
-        TaskName.HARD: ("A301", "203.0.113.200", 2),
-    }
-    opening_logs = {
-        TaskName.EASY: ("L100", "L101"),
-        TaskName.MEDIUM: ("L200", "L201"),
-        TaskName.HARD: ("L300", "L302"),
-    }
-    visible_log_ids = {log.log_id for log in observation.current_logs}
-    if opening_logs[task_name][0] in visible_log_ids and opening_logs[task_name][0] not in analyzed_log_ids:
-        if action.action_type.value != "analyze_log" or action.log_id != opening_logs[task_name][0]:
-            return Action(action_type="analyze_log", log_id=opening_logs[task_name][0])
-    if opening_logs[task_name][1] in visible_log_ids and opening_logs[task_name][1] not in analyzed_log_ids:
-        if action.action_type.value != "analyze_log" or action.log_id != opening_logs[task_name][1]:
-            return Action(action_type="analyze_log", log_id=opening_logs[task_name][1])
+    """Keep local/provider policies on a semantic workflow without fixed fixture IDs."""
+    feedback = observation.previous_action_feedback.lower()
+    if task_name == TaskName.HARD and "escalation captured" in feedback and "incident report" not in feedback:
+        return Action(action_type="create_incident_report", report=_build_report(task_name, observation, analyzed_log_ids))
 
-    alert_id, ip_address, minimum_step = targets[task_name]
-    alert = alerts_by_id.get(alert_id)
-    if alert is None or observation.step_count < minimum_step:
+    best_unanalyzed = _best_unanalyzed_log(observation, analyzed_log_ids)
+    if best_unanalyzed and observation.step_count < 2:
+        if action.action_type.value != "analyze_log" or action.log_id != best_unanalyzed.log_id:
+            return Action(action_type="analyze_log", log_id=best_unanalyzed.log_id)
+
+    best_alert = _best_alert(observation)
+    if best_alert is None or observation.step_count < 2:
         return None
-    if alert.status != "flagged" and action.action_type.value != "flag_alert":
-        return Action(action_type="flag_alert", alert_id=alert_id)
-    if alert.status == "flagged" and ip_address not in observation.blocked_ips and action.action_type.value != "block_ip":
-        return Action(action_type="block_ip", ip_address=ip_address)
-    if task_name == TaskName.HARD and ip_address in observation.blocked_ips and action.action_type.value != "escalate":
-        return Action(action_type="escalate")
+    if best_alert.status != "flagged" and action.action_type.value != "flag_alert":
+        return Action(action_type="flag_alert", alert_id=best_alert.alert_id)
+    if best_alert.status == "flagged" and best_alert.source_ip and best_alert.source_ip not in observation.blocked_ips:
+        if action.action_type.value not in {"block_ip", "isolate_host"}:
+            return Action(action_type="block_ip", ip_address=best_alert.source_ip)
+    if task_name == TaskName.HARD and best_alert.source_ip in observation.blocked_ips and "escalation captured" not in feedback:
+        if action.action_type.value != "escalate":
+            return Action(action_type="escalate")
     return None
 
 
@@ -356,58 +395,47 @@ def build_openai_policy() -> Callable[[TaskName, object], Action]:
 def build_heuristic_policy() -> Callable[[TaskName, object], Action]:
     """Deterministic fallback policy useful for local smoke tests."""
     analyzed_by_task: dict[TaskName, set[str]] = {task_name: set() for task_name in TaskName}
+    queried_by_task: dict[TaskName, set[str]] = {task_name: set() for task_name in TaskName}
+    escalated_tasks: set[TaskName] = set()
 
     def policy(task_name: TaskName, observation) -> Action:
         blocked = set(observation.blocked_ips)
-        visible_logs = {log.log_id for log in observation.current_logs}
-        visible_alerts = {alert.alert_id: alert for alert in observation.active_alerts}
+        best_alert = _best_alert(observation)
+        best_unanalyzed = _best_unanalyzed_log(observation, analyzed_by_task[task_name])
         step = observation.step_count
         if step == 0:
             analyzed_by_task[task_name].clear()
+            queried_by_task[task_name].clear()
+            escalated_tasks.discard(task_name)
 
         def analyze(log_id: str) -> Action:
             analyzed_by_task[task_name].add(log_id)
             return Action(action_type="analyze_log", log_id=log_id)
 
-        if task_name == TaskName.EASY:
-            if step == 0 and "L100" in visible_logs:
-                return analyze("L100")
-            if step == 1 and "L101" in visible_logs:
-                return analyze("L101")
-            if "A100" in visible_alerts and visible_alerts["A100"].status != "flagged":
-                return Action(action_type="flag_alert", alert_id="A100")
-            if "198.51.100.24" not in blocked:
-                return Action(action_type="block_ip", ip_address="198.51.100.24")
-            return Action(action_type="ignore")
+        if task_name == TaskName.HARD and "escalation captured" in observation.previous_action_feedback.lower():
+            return Action(action_type="create_incident_report", report=_build_report(task_name, observation, analyzed_by_task[task_name]))
 
-        if task_name == TaskName.MEDIUM:
-            if step == 0 and "L200" in visible_logs:
-                return analyze("L200")
-            if step <= 2 and "L201" in visible_logs and "L201" not in analyzed_by_task[task_name]:
-                return analyze("L201")
-            if step <= 2 and "A200" not in visible_alerts:
-                return Action(action_type="ignore")
-            if "A200" in visible_alerts and visible_alerts["A200"].status != "flagged":
-                return Action(action_type="flag_alert", alert_id="A200")
-            if "A200" not in visible_alerts:
-                return Action(action_type="ignore")
-            if "203.0.113.77" not in blocked:
-                return Action(action_type="block_ip", ip_address="203.0.113.77")
-            return Action(action_type="ignore")
+        if (
+            task_name == TaskName.HARD
+            and best_alert
+            and best_alert.status == "flagged"
+            and best_alert.source_ip in blocked
+            and task_name not in escalated_tasks
+        ):
+            escalated_tasks.add(task_name)
+            return Action(action_type="escalate")
 
-        if step == 0 and "L300" in visible_logs:
-            return analyze("L300")
-        if step <= 2 and "L302" in visible_logs and "L302" not in analyzed_by_task[task_name]:
-            return analyze("L302")
-        if step <= 2 and "A301" not in visible_alerts:
-            return Action(action_type="ignore")
-        if "A301" in visible_alerts and visible_alerts["A301"].status != "flagged":
-            return Action(action_type="flag_alert", alert_id="A301")
-        if "A301" not in visible_alerts:
-            return Action(action_type="ignore")
-        if "203.0.113.200" not in blocked:
-            return Action(action_type="block_ip", ip_address="203.0.113.200")
-        return Action(action_type="escalate")
+        if best_alert and best_alert.status != "flagged" and step >= 2:
+            return Action(action_type="flag_alert", alert_id=best_alert.alert_id)
+        if best_alert and best_alert.status == "flagged" and best_alert.source_ip and best_alert.source_ip not in blocked:
+            return Action(action_type="block_ip", ip_address=best_alert.source_ip)
+        if best_unanalyzed and (step < 2 or _signal_score(f"{best_unanalyzed.event_type} {best_unanalyzed.message}") > 0):
+            return analyze(best_unanalyzed.log_id)
+        query = "severity>=high"
+        if query not in queried_by_task[task_name]:
+            queried_by_task[task_name].add(query)
+            return Action(action_type="query_logs", query=query)
+        return Action(action_type="ignore")
 
     return policy
 

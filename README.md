@@ -16,6 +16,8 @@ This project implements a deterministic but seeded OpenEnv environment where an 
 
 Security teams repeatedly solve the same structured problems under time pressure: sort noise from signal, correlate telemetry across systems, and contain only the malicious actor without disrupting legitimate users. This environment now emphasizes that tradeoff with partially observable log windows, decoy alerts, seeded branching attack paths, and irreversible mistakes that cap the achievable score.
 
+Scenario log IDs, alert IDs, and IP addresses are deterministically randomized by default so agents must reason from telemetry content instead of memorizing fixture values. Set `OPENENV_RANDOMIZE_IDENTIFIERS=0` only for low-level debugging.
+
 ## Project structure
 
 ```text
@@ -76,6 +78,14 @@ Optional parameters:
 - `report`
 
 The original containment workflow remains valid, while the additional SOC tools let stronger agents search hidden telemetry, check ownership and threat intelligence, isolate a host, and write a final case report.
+
+`query_logs` supports simple SIEM-style filters:
+
+- `source_ip=203.0.113.77`
+- `event_type=web_attack`
+- `severity>=high`
+- `message~credential`
+- `source_ip=203.0.113.77 AND severity>=medium`
 
 ## Observation space
 
@@ -173,7 +183,7 @@ Programmatic graders score episodes in `[0.0, 1.0]` using:
 
 The grader is deterministic, task-aware, and trajectory-aware. False positive blocks cap the score at `0.6`, and unresolved incidents are capped at `0.5`. See `security_incident_env/graders.py`.
 
-Strong case reports receive a small score bonus when they name the attacker, core evidence, correlated alert, containment action, and escalation requirement. Vague or wrong reports are penalized as low-quality analyst work.
+Strong case reports receive a small score bonus when they name the attacker, core evidence, correlated alert, containment action, and escalation requirement. Hard incidents require a strong report to fully resolve; containment plus escalation without the report remains incomplete and score-capped.
 
 ## Local setup
 
@@ -300,7 +310,7 @@ Submit the public Space URL only after the local checks, `openenv push`, and the
 Using the deterministic heuristic policy against the default seed:
 
 - `easy`: `0.851`
-- `medium`: `0.802`
-- `hard`: `0.781`
+- `medium`: `0.717`
+- `hard`: `0.975`
 
 Using random or overly aggressive blocking policies, scores drop quickly because false positives are penalized strongly and delayed containment reduces both reward and final score.

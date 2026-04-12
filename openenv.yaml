@@ -159,6 +159,8 @@ state_schema:
       type: boolean
     evidence_groups:
       type: array
+    requires_report:
+      type: boolean
     timeliness_penalty:
       type: number
     score_cap:

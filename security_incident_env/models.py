@@ -164,6 +164,7 @@ class State(BaseModel):
     required_alert_ids: List[str]
     required_block_ips: List[str]
     requires_escalation: bool
+    requires_report: bool = False
     premature_escalation_count: int = 0
     ignored_attack_count: int = 0
     resolved_step: Optional[int] = None
@@ -235,6 +236,7 @@ class ScenarioDefinition(BaseModel):
     required_alert_ids: List[str]
     required_block_ips: List[str]
     requires_escalation: bool = False
+    requires_report: bool = False
     optimal_steps: int = 5
     initial_visible_log_count: int = 5
     max_steps: int = 8

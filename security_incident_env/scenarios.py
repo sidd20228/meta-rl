@@ -45,10 +45,14 @@ def build_scenario(task_name: TaskName, seed: int, config: EnvironmentConfig | N
     config = config or DEFAULT_CONFIG
     rng = Random(seed)
     if task_name == TaskName.EASY:
-        return _build_easy_scenario(rng, seed, config)
-    if task_name == TaskName.MEDIUM:
-        return _build_medium_scenario(rng, seed, config)
-    return _build_hard_scenario(rng, seed, config)
+        scenario = _build_easy_scenario(rng, seed, config)
+    elif task_name == TaskName.MEDIUM:
+        scenario = _build_medium_scenario(rng, seed, config)
+    else:
+        scenario = _build_hard_scenario(rng, seed, config)
+    if not config.randomize_identifiers:
+        return scenario
+    return _randomize_identifiers(scenario, seed)
 
 
 def _pick_benign_ips(rng: Random, count: int, blocked: Iterable[str] | None = None) -> list[str]:
@@ -56,6 +60,85 @@ def _pick_benign_ips(rng: Random, count: int, blocked: Iterable[str] | None = No
     pool = [ip for ip in BENIGN_IP_POOL if ip not in blocked_set]
     rng.shuffle(pool)
     return pool[:count]
+
+
+def _randomize_identifiers(scenario: ScenarioDefinition, seed: int) -> ScenarioDefinition:
+    """Remap visible IDs and IPs so agents cannot memorize canonical fixtures."""
+    rng = Random(seed + 7919)
+    sorted_logs = sorted(scenario.logs, key=lambda item: (item.timestamp, item.log_id))
+    log_id_map: dict[str, str] = {}
+    used_log_ids: set[str] = set()
+    for log in sorted_logs:
+        log_id_map[log.log_id] = _next_id(rng, "L", used_log_ids)
+
+    alert_id_map: dict[str, str] = {}
+    used_alert_ids: set[str] = set()
+    for alert in sorted(scenario.alerts, key=lambda item: item.alert_id):
+        alert_id_map[alert.alert_id] = _next_id(rng, "A", used_alert_ids)
+
+    ip_map: dict[str, str] = {}
+    used_ips: set[str] = set()
+    all_ips = sorted(
+        {
+            *(log.source_ip for log in scenario.logs),
+            *(alert.source_ip for alert in scenario.alerts if alert.source_ip),
+            *scenario.malicious_ips,
+            *scenario.benign_ips,
+            *scenario.decoy_ips,
+            *scenario.required_block_ips,
+        }
+    )
+    for ip_address in all_ips:
+        ip_map[ip_address] = _next_ip(rng, used_ips)
+
+    remapped_logs = [
+        log.model_copy(update={"log_id": log_id_map[log.log_id], "source_ip": ip_map[log.source_ip]})
+        for log in scenario.logs
+    ]
+    remapped_alerts = [
+        alert.model_copy(
+            update={
+                "alert_id": alert_id_map[alert.alert_id],
+                "related_log_ids": [log_id_map[log_id] for log_id in alert.related_log_ids],
+                "source_ip": ip_map.get(alert.source_ip) if alert.source_ip else None,
+            }
+        )
+        for alert in scenario.alerts
+    ]
+    return scenario.model_copy(
+        update={
+            "logs": remapped_logs,
+            "alerts": remapped_alerts,
+            "malicious_log_ids": [log_id_map[log_id] for log_id in scenario.malicious_log_ids],
+            "malicious_ips": [ip_map[ip_address] for ip_address in scenario.malicious_ips],
+            "benign_ips": [ip_map[ip_address] for ip_address in scenario.benign_ips],
+            "decoy_ips": [ip_map[ip_address] for ip_address in scenario.decoy_ips],
+            "decoy_log_ids": [log_id_map[log_id] for log_id in scenario.decoy_log_ids],
+            "decoy_alert_ids": [alert_id_map[alert_id] for alert_id in scenario.decoy_alert_ids],
+            "log_stage_map": {log_id_map[log_id]: stage for log_id, stage in scenario.log_stage_map.items()},
+            "evidence_groups": [[log_id_map[log_id] for log_id in group] for group in scenario.evidence_groups],
+            "required_analysis_log_ids": [log_id_map[log_id] for log_id in scenario.required_analysis_log_ids],
+            "required_alert_ids": [alert_id_map[alert_id] for alert_id in scenario.required_alert_ids],
+            "required_block_ips": [ip_map[ip_address] for ip_address in scenario.required_block_ips],
+        }
+    )
+
+
+def _next_id(rng: Random, prefix: str, used: set[str]) -> str:
+    while True:
+        candidate = f"{prefix}{rng.randrange(1000, 9999)}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+
+
+def _next_ip(rng: Random, used: set[str]) -> str:
+    ranges = ("198.51.100", "203.0.113", "192.0.2")
+    while True:
+        candidate = f"{ranges[rng.randrange(len(ranges))]}.{rng.randrange(10, 240)}"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
 
 
 def _ts(base_time: datetime, seconds_offset: int) -> str:
@@ -632,7 +715,8 @@ def _build_hard_scenario(rng: Random, seed: int, config: EnvironmentConfig) -> S
         required_alert_ids=["A301"],
         required_block_ips=[attacker_ip],
         requires_escalation=True,
-        optimal_steps=5,
+        requires_report=True,
+        optimal_steps=6,
         initial_visible_log_count=min(config.initial_visible_logs, 5),
         max_steps=min(config.max_steps, 8),
         max_budget=_scenario_budget(config, 8),

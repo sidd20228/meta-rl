@@ -28,6 +28,14 @@ def get_float_env(name: str, default: float) -> float:
         return default
 
 
+def get_bool_env(name: str, default: bool) -> bool:
+    """Read a boolean environment variable with a safe default."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 DEFAULT_ENV_NAME = os.getenv("OPENENV_ENV_NAME", "security-incident-response")
 SERVICE_HOST = os.getenv("OPENENV_HOST", "0.0.0.0")
 SERVICE_PORT = get_int_env("OPENENV_PORT", 7860)
@@ -47,6 +55,7 @@ class EnvironmentConfig:
     difficulty_profile: str = "standard"
     initial_visible_logs: int = 5
     reveal_per_step: int = 1
+    randomize_identifiers: bool = True
 
     @property
     def log_window(self) -> int:
@@ -103,6 +112,7 @@ def load_environment_config() -> EnvironmentConfig:
         difficulty_profile=difficulty_profile,
         initial_visible_logs=initial_visible_logs,
         reveal_per_step=max(1, min(3, get_int_env("OPENENV_REVEAL_PER_STEP", 1))),
+        randomize_identifiers=get_bool_env("OPENENV_RANDOMIZE_IDENTIFIERS", True),
     )
 
 

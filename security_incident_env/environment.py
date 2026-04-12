@@ -137,6 +137,7 @@ class SecurityIncidentResponseEnv:
             required_alert_ids=list(scenario.required_alert_ids),
             required_block_ips=list(scenario.required_block_ips),
             requires_escalation=scenario.requires_escalation,
+            requires_report=scenario.requires_report,
             resolved_step=None,
             analyst_notes=[],
             curriculum_level=int(curriculum_snapshot["level"]),
@@ -647,7 +648,13 @@ class SecurityIncidentResponseEnv:
         required_alerts = self._required_alerts_complete()
         required_analysis = self._required_analysis_complete()
         if state.requires_escalation:
-            return required_blocked and required_alerts and required_analysis and state.escalation_sent
+            return (
+                required_blocked
+                and required_alerts
+                and required_analysis
+                and state.escalation_sent
+                and (not state.requires_report or state.report_score >= 0.75)
+            )
         return required_blocked and required_alerts
 
     def _required_analysis_complete(self) -> bool:
@@ -703,11 +710,60 @@ class SecurityIncidentResponseEnv:
         return known_ips
 
     def _log_matches_query(self, log, query: str) -> bool:
-        terms = [term for term in query.replace(",", " ").split() if term]
+        normalized_query = query.replace(" and ", " ").replace(" AND ", " ")
+        terms = [term for term in normalized_query.replace(",", " ").split() if term]
         if not terms:
             return False
         haystack = f"{log.log_id} {log.source_ip} {log.event_type} {log.severity.value} {log.message}".lower()
-        return all(term in haystack for term in terms)
+        return all(self._query_term_matches(log, term, haystack) for term in terms)
+
+    def _query_term_matches(self, log, term: str, haystack: str) -> bool:
+        if "~" in term:
+            field, value = term.split("~", 1)
+            return value.lower() in self._query_field_value(log, field).lower()
+        for operator in (">=", "<=", "="):
+            if operator not in term:
+                continue
+            field, value = term.split(operator, 1)
+            observed = self._query_field_value(log, field)
+            if not observed:
+                return False
+            if field == "severity":
+                observed_rank = STAGE_ORDER.get(observed, None)
+                severity_order = {
+                    "low": 1,
+                    "medium": 2,
+                    "high": 3,
+                    "critical": 4,
+                }
+                observed_rank = severity_order.get(observed.lower(), 0)
+                expected_rank = severity_order.get(value.lower(), 0)
+                if operator == ">=":
+                    return observed_rank >= expected_rank
+                if operator == "<=":
+                    return observed_rank <= expected_rank
+            return observed.lower() == value.lower()
+        return term.lower() in haystack
+
+    def _query_field_value(self, log, field: str) -> str:
+        normalized = field.strip().lower()
+        aliases = {
+            "id": "log_id",
+            "log": "log_id",
+            "log_id": "log_id",
+            "ip": "source_ip",
+            "source": "source_ip",
+            "source_ip": "source_ip",
+            "event": "event_type",
+            "event_type": "event_type",
+            "severity": "severity",
+            "message": "message",
+        }
+        attr = aliases.get(normalized)
+        if attr is None:
+            return ""
+        value = getattr(log, attr)
+        return value.value if hasattr(value, "value") else str(value)
 
     def _score_incident_report(self, report: str) -> float:
         state = self._require_state()

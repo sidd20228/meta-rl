@@ -20,6 +20,14 @@ from security_incident_env.models import Action, TaskName
 from security_incident_env.scenarios import build_scenario
 
 
+def _strong_report(env: SecurityIncidentResponseEnv) -> str:
+    state = env.state()
+    return (
+        f"Attacker {state.required_block_ips[0]} used evidence {', '.join(state.required_analysis_log_ids)}. "
+        f"Alert {state.required_alert_ids[0]} should be contained by block and escalated."
+    )
+
+
 class EnvironmentDeterminismTests(unittest.TestCase):
     """Scenario generation and grading must be reproducible."""
 
@@ -30,6 +38,15 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         self.assertEqual(scenario_a.attack_path, scenario_b.attack_path)
         self.assertEqual([log.model_dump(mode="json") for log in scenario_a.logs], [log.model_dump(mode="json") for log in scenario_b.logs])
         self.assertEqual([alert.model_dump(mode="json") for alert in scenario_a.alerts], [alert.model_dump(mode="json") for alert in scenario_b.alerts])
+
+    def test_scenario_identifiers_are_randomized_but_ground_truth_is_consistent(self) -> None:
+        scenario = build_scenario(TaskName.HARD, seed=17)
+
+        self.assertNotIn("L300", {log.log_id for log in scenario.logs})
+        self.assertNotIn("A301", {alert.alert_id for alert in scenario.alerts})
+        self.assertNotIn("203.0.113.200", set(scenario.required_block_ips))
+        self.assertTrue(set(scenario.required_analysis_log_ids).issubset({log.log_id for log in scenario.logs}))
+        self.assertTrue(set(scenario.required_alert_ids).issubset({alert.alert_id for alert in scenario.alerts}))
 
     def test_hard_task_exposes_multiple_branches_across_seed_range(self) -> None:
         branches = {build_scenario(TaskName.HARD, seed=seed).attack_path for seed in range(900, 908)}
@@ -44,11 +61,8 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         self.assertEqual(observation.remaining_budget, 8)
         self.assertFalse(observation.context_truncated)
 
-        for action in [
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L301"),
-            Action(action_type="analyze_log", log_id="L302"),
-        ]:
+        for log_id in [env.state().required_analysis_log_ids[0], env.state().decoy_log_ids[0], env.state().required_analysis_log_ids[1]]:
+            action = Action(action_type="analyze_log", log_id=log_id)
             observation, _, _, _ = env.step(action)
 
         self.assertLessEqual(len(observation.current_logs), 5)
@@ -59,14 +73,15 @@ class EnvironmentDeterminismTests(unittest.TestCase):
     def test_budget_exhaustion_ends_episode(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.EASY)
+        state = env.state()
 
         actions = [
-            Action(action_type="analyze_log", log_id="L100"),
-            Action(action_type="analyze_log", log_id="L101"),
-            Action(action_type="flag_alert", alert_id="A101"),
-            Action(action_type="block_ip", ip_address="198.51.100.24"),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.decoy_alert_ids[0]),
+            Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
             Action(action_type="escalate"),
-            Action(action_type="analyze_log", log_id="L108"),
+            Action(action_type="analyze_log", log_id=state.malicious_log_ids[-1]),
         ]
 
         done = False
@@ -83,7 +98,7 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.HARD)
 
-        env.step(Action(action_type="analyze_log", log_id="L300"))
+        env.step(Action(action_type="analyze_log", log_id=env.state().required_analysis_log_ids[0]))
         _, reward, done, info = env.step(Action(action_type="escalate"))
 
         self.assertFalse(done)
@@ -95,13 +110,15 @@ class EnvironmentDeterminismTests(unittest.TestCase):
     def test_escalation_after_mitigation_resolves_incident(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.HARD)
+        state = env.state()
 
         actions = [
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L302"),
-            Action(action_type="flag_alert", alert_id="A301"),
-            Action(action_type="block_ip", ip_address="203.0.113.200"),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+            Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
             Action(action_type="escalate"),
+            Action(action_type="create_incident_report", report=_strong_report(env)),
         ]
 
         done = False
@@ -116,33 +133,36 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         self.assertGreater(reward, 0.0)
 
     def test_hard_heuristic_is_no_longer_near_perfect(self) -> None:
+        env = SecurityIncidentResponseEnv(seed=17)
+        env.reset(TaskName.HARD)
+        state = env.state()
         actions = [
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L301"),
-            Action(action_type="analyze_log", log_id="L302"),
-            Action(action_type="flag_alert", alert_id="A301"),
-            Action(action_type="block_ip", ip_address="203.0.113.200"),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.decoy_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+            Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
             Action(action_type="escalate"),
         ]
 
-        env = SecurityIncidentResponseEnv(seed=17)
-        env.reset(TaskName.HARD)
         for action in actions:
             env.step(action)
 
         grade = grade_episode(env.state())
-        self.assertGreaterEqual(grade.score, 0.6)
+        self.assertGreaterEqual(grade.score, 0.3)
         self.assertLessEqual(grade.score, 0.8)
 
     def test_judge_fallback_is_deterministic(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.HARD)
+        state = env.state()
         for action in [
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L302"),
-            Action(action_type="flag_alert", alert_id="A301"),
-            Action(action_type="block_ip", ip_address="203.0.113.200"),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+            Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
             Action(action_type="escalate"),
+            Action(action_type="create_incident_report", report=_strong_report(env)),
         ]:
             env.step(action)
 
@@ -156,13 +176,15 @@ class EnvironmentDeterminismTests(unittest.TestCase):
     def test_grade_exposes_multi_layer_scores(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.HARD)
+        state = env.state()
         for action in [
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L301"),
-            Action(action_type="analyze_log", log_id="L302"),
-            Action(action_type="flag_alert", alert_id="A301"),
-            Action(action_type="block_ip", ip_address="203.0.113.200"),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.decoy_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+            Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
             Action(action_type="escalate"),
+            Action(action_type="create_incident_report", report=_strong_report(env)),
         ]:
             env.step(action)
 
@@ -177,50 +199,50 @@ class EnvironmentDeterminismTests(unittest.TestCase):
     def test_query_logs_can_reveal_hidden_attack_telemetry(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         observation = env.reset(TaskName.MEDIUM)
-        self.assertNotIn("L202", {log.log_id for log in observation.current_logs})
+        hidden_impact_log = next(log for log in env.state().remaining_log_queue if log.event_type == "impact_signal")
+        self.assertNotIn(hidden_impact_log.log_id, {log.log_id for log in observation.current_logs})
 
-        observation, reward, _, info = env.step(Action(action_type="query_logs", query="impact_signal"))
+        observation, reward, _, info = env.step(Action(action_type="query_logs", query="event_type=impact_signal"))
 
         self.assertGreater(reward, 0.0)
-        self.assertIn("L202", {log.log_id for log in env.state().full_log_history})
-        self.assertIn("L202", info["feedback"])
+        self.assertIn(hidden_impact_log.log_id, {log.log_id for log in env.state().full_log_history})
+        self.assertIn(hidden_impact_log.log_id, info["feedback"])
         self.assertTrue(observation.analyst_notes)
 
     def test_threat_intel_and_incident_report_are_scored(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.HARD)
+        state = env.state()
         for action in [
-            Action(action_type="lookup_threat_intel", ip_address="203.0.113.200"),
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L302"),
-            Action(action_type="flag_alert", alert_id="A301"),
-            Action(
-                action_type="create_incident_report",
-                report="Attacker 203.0.113.200 used evidence L300 and L302. Alert A301 should be contained by block and escalated.",
-            ),
+            Action(action_type="lookup_threat_intel", ip_address=state.required_block_ips[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+            Action(action_type="create_incident_report", report=_strong_report(env)),
         ]:
             env.step(action)
 
         grade = grade_episode(env.state(), use_llm_judge=False)
         self.assertGreaterEqual(env.state().report_score, 0.75)
         self.assertGreaterEqual(grade.report_quality, 0.75)
-        self.assertIn("203.0.113.200", env.state().intel_lookups)
+        self.assertIn(state.required_block_ips[0], env.state().intel_lookups)
 
     def test_hard_task_without_case_report_is_score_capped(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         env.reset(TaskName.HARD)
+        state = env.state()
         for action in [
-            Action(action_type="analyze_log", log_id="L300"),
-            Action(action_type="analyze_log", log_id="L302"),
-            Action(action_type="flag_alert", alert_id="A301"),
-            Action(action_type="block_ip", ip_address="203.0.113.200"),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+            Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+            Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+            Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
             Action(action_type="escalate"),
         ]:
             env.step(action)
 
         grade = grade_episode(env.state(), use_llm_judge=False)
 
-        self.assertTrue(env.state().incident_resolved)
+        self.assertFalse(env.state().incident_resolved)
         self.assertFalse(env.state().report_submitted)
         self.assertLessEqual(grade.programmatic_score, 0.78)
         self.assertLess(grade.score, 0.82)
@@ -240,15 +262,15 @@ class EnvironmentDeterminismTests(unittest.TestCase):
 
     def test_adaptive_difficulty_increases_after_repeated_success(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
-        winning_actions = [
-            Action(action_type="analyze_log", log_id="L100"),
-            Action(action_type="analyze_log", log_id="L101"),
-            Action(action_type="flag_alert", alert_id="A100"),
-            Action(action_type="block_ip", ip_address="198.51.100.24"),
-        ]
-
         for _ in range(4):
             env.reset(TaskName.EASY)
+            state = env.state()
+            winning_actions = [
+                Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[0]),
+                Action(action_type="analyze_log", log_id=state.required_analysis_log_ids[1]),
+                Action(action_type="flag_alert", alert_id=state.required_alert_ids[0]),
+                Action(action_type="block_ip", ip_address=state.required_block_ips[0]),
+            ]
             for action in winning_actions:
                 _, _, done, _ = env.step(action)
                 if done:
@@ -272,15 +294,15 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         observation = env.reset(TaskName.EASY)
         action = Action(
             action_type="block_ip",
-            ip_address="198.51.100.24",
-            log_id="L100",
-            alert_id="A100",
+            ip_address=env.state().required_block_ips[0],
+            log_id=env.state().required_analysis_log_ids[0],
+            alert_id=env.state().required_alert_ids[0],
         )
 
         sanitized = sanitize_action(action, observation)
 
         self.assertEqual(sanitized.action_type.value, "analyze_log")
-        self.assertEqual(sanitized.log_id, "L100")
+        self.assertEqual(sanitized.log_id, env.state().required_analysis_log_ids[0])
         self.assertIsNone(sanitized.alert_id)
         self.assertIsNone(sanitized.ip_address)
 
@@ -291,7 +313,7 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         sanitized = sanitize_action(Action(action_type="ignore"), observation)
 
         self.assertEqual(sanitized.action_type.value, "analyze_log")
-        self.assertEqual(sanitized.log_id, "L100")
+        self.assertEqual(sanitized.log_id, env.state().required_analysis_log_ids[0])
 
     def test_inference_default_emits_all_three_task_episodes(self) -> None:
         result = subprocess.run(
