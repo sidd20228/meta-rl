@@ -179,6 +179,43 @@ def _best_unanalyzed_log(observation: Observation, analyzed_log_ids: set[str]) -
     )
 
 
+def _best_analyzed_signal_log(observation: Observation, analyzed_log_ids: set[str]) -> Optional[LogEntry]:
+    candidates = [log for log in observation.current_logs if log.log_id in analyzed_log_ids]
+    if not candidates:
+        return None
+    best = max(
+        candidates,
+        key=lambda log: (
+            _signal_score(f"{log.event_type} {log.message}"),
+            _severity_rank(log.severity.value),
+            log.log_id,
+        ),
+    )
+    return best if _signal_score(f"{best.event_type} {best.message}") > 0 else None
+
+
+def _best_same_source_unanalyzed_log(
+    observation: Observation,
+    analyzed_log_ids: set[str],
+    source_ip: str,
+) -> Optional[LogEntry]:
+    candidates = [
+        log
+        for log in observation.current_logs
+        if log.source_ip == source_ip and log.log_id not in analyzed_log_ids
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda log: (
+            _signal_score(f"{log.event_type} {log.message}"),
+            _severity_rank(log.severity.value),
+            log.log_id,
+        ),
+    )
+
+
 def _build_report(task_name: TaskName, observation: Observation, analyzed_log_ids: set[str]) -> str:
     alert = _best_alert(observation)
     ip_address = observation.blocked_ips[-1] if observation.blocked_ips else (_best_block_ip(observation) or (alert.source_ip if alert else "unknown"))
@@ -280,21 +317,37 @@ def _task_workflow_guardrail(
         return Action(action_type="create_incident_report", report=_build_report(task_name, observation, analyzed_log_ids))
 
     best_unanalyzed = _best_unanalyzed_log(observation, analyzed_log_ids)
+    best_alert = _best_alert(observation)
+    if best_alert and best_alert.status == "flagged" and best_alert.source_ip and best_alert.source_ip not in observation.blocked_ips:
+        if action.action_type.value not in {"block_ip", "isolate_host"}:
+            return Action(action_type="block_ip", ip_address=best_alert.source_ip)
+    if task_name == TaskName.HARD and best_alert and best_alert.source_ip in observation.blocked_ips and "escalation captured" not in feedback:
+        if action.action_type.value != "escalate":
+            return Action(action_type="escalate")
+
+    analyzed_signal = _best_analyzed_signal_log(observation, analyzed_log_ids)
+    if analyzed_signal is not None:
+        same_source = _best_same_source_unanalyzed_log(observation, analyzed_log_ids, analyzed_signal.source_ip)
+        if same_source is not None and _signal_score(f"{same_source.event_type} {same_source.message}") > 0:
+            if action.action_type.value != "analyze_log" or action.log_id != same_source.log_id:
+                return Action(action_type="analyze_log", log_id=same_source.log_id)
+        source_query = f"source_ip={analyzed_signal.source_ip}"
+        query_seen = any(source_query in note for note in observation.analyst_notes)
+        if "not decisive until correlated" in feedback and not query_seen:
+            if action.action_type.value != "query_logs" or action.query != source_query:
+                return Action(action_type="query_logs", query=source_query)
+
     if best_unanalyzed and observation.step_count < 2:
         if action.action_type.value != "analyze_log" or action.log_id != best_unanalyzed.log_id:
             return Action(action_type="analyze_log", log_id=best_unanalyzed.log_id)
+    if best_unanalyzed and "found attack telemetry" in feedback and _signal_score(f"{best_unanalyzed.event_type} {best_unanalyzed.message}") > 0:
+        if action.action_type.value != "analyze_log" or action.log_id != best_unanalyzed.log_id:
+            return Action(action_type="analyze_log", log_id=best_unanalyzed.log_id)
 
-    best_alert = _best_alert(observation)
     if best_alert is None or observation.step_count < 2:
         return None
     if best_alert.status != "flagged" and action.action_type.value != "flag_alert":
         return Action(action_type="flag_alert", alert_id=best_alert.alert_id)
-    if best_alert.status == "flagged" and best_alert.source_ip and best_alert.source_ip not in observation.blocked_ips:
-        if action.action_type.value not in {"block_ip", "isolate_host"}:
-            return Action(action_type="block_ip", ip_address=best_alert.source_ip)
-    if task_name == TaskName.HARD and best_alert.source_ip in observation.blocked_ips and "escalation captured" not in feedback:
-        if action.action_type.value != "escalate":
-            return Action(action_type="escalate")
     return None
 
 
@@ -385,6 +438,10 @@ def build_openai_policy() -> Callable[[TaskName, object], Action]:
         if observation.step_count == 0:
             analyzed_by_task[task_name].clear()
         action = request_model_action(client, model_name, task_name, observation, analyzed_by_task[task_name])
+        if "found attack telemetry" in observation.previous_action_feedback.lower():
+            follow_up_log = _best_unanalyzed_log(observation, analyzed_by_task[task_name])
+            if follow_up_log and _signal_score(f"{follow_up_log.event_type} {follow_up_log.message}") > 0:
+                action = Action(action_type="analyze_log", log_id=follow_up_log.log_id)
         if action.action_type == ActionType.ANALYZE_LOG and action.log_id:
             analyzed_by_task[task_name].add(action.log_id)
         return action
@@ -415,6 +472,8 @@ def build_heuristic_policy() -> Callable[[TaskName, object], Action]:
         if task_name == TaskName.HARD and "escalation captured" in observation.previous_action_feedback.lower():
             return Action(action_type="create_incident_report", report=_build_report(task_name, observation, analyzed_by_task[task_name]))
 
+        if best_alert and best_alert.status == "flagged" and best_alert.source_ip and best_alert.source_ip not in blocked:
+            return Action(action_type="block_ip", ip_address=best_alert.source_ip)
         if (
             task_name == TaskName.HARD
             and best_alert
@@ -425,10 +484,22 @@ def build_heuristic_policy() -> Callable[[TaskName, object], Action]:
             escalated_tasks.add(task_name)
             return Action(action_type="escalate")
 
+        analyzed_signal = _best_analyzed_signal_log(observation, analyzed_by_task[task_name])
+        if analyzed_signal is not None:
+            same_source = _best_same_source_unanalyzed_log(observation, analyzed_by_task[task_name], analyzed_signal.source_ip)
+            if same_source is not None and _signal_score(f"{same_source.event_type} {same_source.message}") > 0:
+                return analyze(same_source.log_id)
+            source_query = f"source_ip={analyzed_signal.source_ip}"
+            if "not decisive until correlated" in observation.previous_action_feedback.lower() and source_query not in queried_by_task[task_name]:
+                queried_by_task[task_name].add(source_query)
+                return Action(action_type="query_logs", query=source_query)
+
+        if best_unanalyzed and "found attack telemetry" in observation.previous_action_feedback.lower():
+            if _signal_score(f"{best_unanalyzed.event_type} {best_unanalyzed.message}") > 0:
+                return analyze(best_unanalyzed.log_id)
+
         if best_alert and best_alert.status != "flagged" and step >= 2:
             return Action(action_type="flag_alert", alert_id=best_alert.alert_id)
-        if best_alert and best_alert.status == "flagged" and best_alert.source_ip and best_alert.source_ip not in blocked:
-            return Action(action_type="block_ip", ip_address=best_alert.source_ip)
         if best_unanalyzed and (step < 2 or _signal_score(f"{best_unanalyzed.event_type} {best_unanalyzed.message}") > 0):
             return analyze(best_unanalyzed.log_id)
         query = "severity>=high"

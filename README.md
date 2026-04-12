@@ -310,7 +310,7 @@ Submit the public Space URL only after the local checks, `openenv push`, and the
 Using the deterministic heuristic policy against the default seed:
 
 - `easy`: `0.851`
-- `medium`: `0.717`
+- `medium`: `0.816`
 - `hard`: `0.975`
 
 Using random or overly aggressive blocking policies, scores drop quickly because false positives are penalized strongly and delayed containment reduces both reward and final score.
