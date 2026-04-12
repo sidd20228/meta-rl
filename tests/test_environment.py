@@ -206,6 +206,25 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         self.assertGreaterEqual(grade.report_quality, 0.75)
         self.assertIn("203.0.113.200", env.state().intel_lookups)
 
+    def test_hard_task_without_case_report_is_score_capped(self) -> None:
+        env = SecurityIncidentResponseEnv(seed=17)
+        env.reset(TaskName.HARD)
+        for action in [
+            Action(action_type="analyze_log", log_id="L300"),
+            Action(action_type="analyze_log", log_id="L302"),
+            Action(action_type="flag_alert", alert_id="A301"),
+            Action(action_type="block_ip", ip_address="203.0.113.200"),
+            Action(action_type="escalate"),
+        ]:
+            env.step(action)
+
+        grade = grade_episode(env.state(), use_llm_judge=False)
+
+        self.assertTrue(env.state().incident_resolved)
+        self.assertFalse(env.state().report_submitted)
+        self.assertLessEqual(grade.programmatic_score, 0.78)
+        self.assertLess(grade.score, 0.82)
+
     def test_curriculum_records_weak_spots_after_failed_episode(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         observation = env.reset(TaskName.EASY)

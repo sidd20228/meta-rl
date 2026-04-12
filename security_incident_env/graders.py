@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from .judge import evaluate_judge
-from .models import ActionType, EpisodeGrade, State
+from .models import ActionType, EpisodeGrade, State, TaskName
 
 TIME_DECAY_ALPHA = 0.05
 
@@ -155,6 +155,8 @@ def _programmatic_breakdown(state: State) -> dict[str, float]:
         score = min(score, 0.55)
     if not state.incident_resolved:
         score = min(score, 0.5)
+    if state.task_name == TaskName.HARD and not state.report_submitted:
+        score = min(score, 0.78)
     score = min(score, state.score_cap)
 
     if _is_optimal_trajectory(state):
@@ -218,7 +220,8 @@ def _is_optimal_trajectory(state: State) -> bool:
         and set(state.required_block_ips).issubset(set(state.blocked_ips))
         and _dependency_score(state) == 1.0
         and (not state.requires_escalation or state.escalation_sent)
-        and (not state.report_submitted or state.report_score >= 0.75)
+        and (state.task_name != TaskName.HARD or (state.report_submitted and state.report_score >= 0.75))
+        and (state.task_name == TaskName.HARD or not state.report_submitted or state.report_score >= 0.75)
         and _ordering_is_valid(state)
     )
 

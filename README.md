@@ -301,6 +301,6 @@ Using the deterministic heuristic policy against the default seed:
 
 - `easy`: `0.851`
 - `medium`: `0.802`
-- `hard`: `0.935`
+- `hard`: `0.781`
 
 Using random or overly aggressive blocking policies, scores drop quickly because false positives are penalized strongly and delayed containment reduces both reward and final score.
