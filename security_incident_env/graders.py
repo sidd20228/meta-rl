@@ -16,6 +16,7 @@ def grade_episode(state: State, use_llm_judge: bool | None = None) -> EpisodeGra
     judge_result = evaluate_judge(state, use_llm=use_llm_judge) if _should_run_judge(state, use_llm_judge) else evaluate_judge(state, use_llm=False)
 
     score = (0.7 * programmatic["score"]) + (0.3 * judge_result.normalized_score)
+    score += 0.04 * programmatic["report_quality"]
     score = max(0.0, min(1.0, score))
 
     environment_reward = _environment_reward(state)
@@ -34,6 +35,7 @@ def grade_episode(state: State, use_llm_judge: bool | None = None) -> EpisodeGra
         timeliness=round(programmatic["timeliness"], 4),
         trajectory_quality=round(programmatic["trajectory_quality"], 4),
         false_positive_penalty=round(programmatic["false_positive_penalty"], 4),
+        report_quality=round(programmatic["report_quality"], 4),
         resolved=state.incident_resolved,
         steps_taken=state.steps_taken,
         score_cap=round(state.score_cap, 4),
@@ -127,14 +129,20 @@ def _programmatic_breakdown(state: State) -> dict[str, float]:
     trajectory_quality = max(0.0, 1.0 - trajectory_penalty)
     if not _ordering_is_valid(state):
         trajectory_quality = max(0.0, trajectory_quality - 0.18)
+    if state.report_submitted and state.report_score >= 0.75:
+        trajectory_quality = min(1.0, trajectory_quality + 0.04)
+    elif state.report_submitted and state.report_score < 0.35:
+        trajectory_quality = max(0.0, trajectory_quality - 0.05)
 
     false_positive_penalty = min(0.5, 0.25 * len(state.false_positive_blocks))
+    report_quality = state.report_score if state.report_submitted else 0.0
     score = (
         (0.4 * correctness)
         + (0.18 * efficiency)
         + (0.2 * timeliness)
         + (0.12 * trajectory_quality)
         + (0.1 * dependency_score)
+        + (0.04 * report_quality)
         - false_positive_penalty
     )
 
@@ -159,6 +167,7 @@ def _programmatic_breakdown(state: State) -> dict[str, float]:
         "timeliness": timeliness,
         "trajectory_quality": trajectory_quality,
         "false_positive_penalty": false_positive_penalty,
+        "report_quality": report_quality,
     }
 
 
@@ -209,6 +218,7 @@ def _is_optimal_trajectory(state: State) -> bool:
         and set(state.required_block_ips).issubset(set(state.blocked_ips))
         and _dependency_score(state) == 1.0
         and (not state.requires_escalation or state.escalation_sent)
+        and (not state.report_submitted or state.report_score >= 0.75)
         and _ordering_is_valid(state)
     )
 

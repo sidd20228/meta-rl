@@ -22,13 +22,13 @@ curl -X POST http://localhost:7860/reset -H "Content-Type: application/json" -d 
 export API_BASE_URL=https://router.huggingface.co/v1
 export MODEL_NAME=<hf-model-id>
 export HF_TOKEN=<your-token>
-python hf_runner.py --task hard
+python inference.py
 ```
 
-Run multiple episodes:
+Run one task explicitly:
 
 ```bash
-python hf_runner.py --task hard --episodes 5
+python inference.py --task hard
 ```
 
 ## Run Compliance Checks

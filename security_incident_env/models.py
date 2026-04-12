@@ -20,9 +20,14 @@ class ActionType(str, Enum):
     """Agent actions supported by the environment."""
 
     ANALYZE_LOG = "analyze_log"
+    QUERY_LOGS = "query_logs"
     FLAG_ALERT = "flag_alert"
+    INSPECT_USER = "inspect_user"
+    LOOKUP_THREAT_INTEL = "lookup_threat_intel"
     BLOCK_IP = "block_ip"
+    ISOLATE_HOST = "isolate_host"
     ESCALATE = "escalate"
+    CREATE_INCIDENT_REPORT = "create_incident_report"
     IGNORE = "ignore"
 
 
@@ -61,6 +66,9 @@ class Action(BaseModel):
     log_id: Optional[str] = None
     ip_address: Optional[str] = None
     alert_id: Optional[str] = None
+    query: Optional[str] = None
+    user_id: Optional[str] = None
+    report: Optional[str] = None
 
 
 class LogEntry(BaseModel):
@@ -99,6 +107,10 @@ class Observation(BaseModel):
     visible_history_count: int = 0
     log_window_size: int = 5
     context_truncated: bool = False
+    analyst_notes: List[str] = Field(default_factory=list)
+    curriculum_level: int = 0
+    curriculum_profile: str = "warmup"
+    weak_spot_hints: List[str] = Field(default_factory=list)
 
 
 class State(BaseModel):
@@ -123,6 +135,7 @@ class State(BaseModel):
     analyzed_log_ids: List[str]
     flagged_alert_ids: List[str]
     blocked_ips: List[str]
+    isolated_hosts: List[str]
     false_positive_blocks: List[str]
     decoy_ips: List[str]
     escalation_sent: bool
@@ -154,6 +167,16 @@ class State(BaseModel):
     premature_escalation_count: int = 0
     ignored_attack_count: int = 0
     resolved_step: Optional[int] = None
+    queried_terms: List[str] = Field(default_factory=list)
+    inspected_users: List[str] = Field(default_factory=list)
+    intel_lookups: List[str] = Field(default_factory=list)
+    incident_report: Optional[str] = None
+    report_submitted: bool = False
+    report_score: float = 0.0
+    analyst_notes: List[str] = Field(default_factory=list)
+    curriculum_level: int = 0
+    curriculum_profile: str = "warmup"
+    weak_spot_hints: List[str] = Field(default_factory=list)
 
 
 class JudgePhaseQuality(BaseModel):
@@ -247,6 +270,7 @@ class StepInfo(BaseModel):
     programmatic_score: float
     llm_judge_score: float
     final_reward: float
+    report_score: float = 0.0
     feedback: str
     score_cap: float
     judge_explanation: Optional[str] = None
@@ -269,6 +293,7 @@ class EpisodeGrade(BaseModel):
     timeliness: float
     trajectory_quality: float
     false_positive_penalty: float
+    report_quality: float = 0.0
     resolved: bool
     steps_taken: int
     score_cap: float

@@ -31,7 +31,7 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 @app.get("/health")
 def health() -> dict[str, str]:
     """Simple health check for container orchestration."""
-    return {"status": "ok", "env_name": DEFAULT_ENV_NAME}
+    return {"status": "healthy", "env_name": DEFAULT_ENV_NAME}
 
 
 @app.post("/reset", response_model=ResetResponse)

@@ -33,6 +33,7 @@ Security teams repeatedly solve the same structured problems under time pressure
 └── security_incident_env
     ├── __init__.py
     ├── config.py
+    ├── curriculum.py
     ├── environment.py
     ├── graders.py
     ├── models.py
@@ -55,9 +56,14 @@ Pydantic models are used for `Action`, `Observation`, `State`, alerts, logs, and
 The agent can submit these actions:
 
 - `analyze_log`
+- `query_logs`
 - `flag_alert`
+- `inspect_user`
+- `lookup_threat_intel`
 - `block_ip`
+- `isolate_host`
 - `escalate`
+- `create_incident_report`
 - `ignore`
 
 Optional parameters:
@@ -65,6 +71,11 @@ Optional parameters:
 - `log_id`
 - `ip_address`
 - `alert_id`
+- `query`
+- `user_id`
+- `report`
+
+The original containment workflow remains valid, while the additional SOC tools let stronger agents search hidden telemetry, check ownership and threat intelligence, isolate a host, and write a final case report.
 
 ## Observation space
 
@@ -78,6 +89,10 @@ Each observation contains:
 - `visible_history_count`
 - `log_window_size`
 - `context_truncated`
+- `analyst_notes`
+- `curriculum_level`
+- `curriculum_profile`
+- `weak_spot_hints`
 
 ## Internal state
 
@@ -96,6 +111,19 @@ The hidden state tracks:
 - timeliness penalties
 - trajectory metrics used by the grader
 - whether the incident is resolved
+- curriculum profile and weak spots from recent episodes
+- query, intel, isolation, and case-report artifacts
+
+## Curriculum and adversarial pressure
+
+The environment includes a lightweight curriculum controller inspired by incident-response training platforms:
+
+- recent success rate and score move each task through `warmup`, `analyst`, and `principal` profiles
+- higher profiles add more decoys, increase noise, and shrink the visible log window
+- failed episodes record weak spots such as false-positive containment, missed alert correlation, missed escalation, and weak case reports
+- observations expose compact curriculum hints without exposing hidden ground truth
+
+Completed episodes can be written to `outputs/episode_transcripts.jsonl` for post-run analysis. Set `OPENENV_WRITE_TRANSCRIPTS=0` to disable transcript writing or `OPENENV_TRANSCRIPT_PATH` to choose a different path.
 
 ## Task levels
 
@@ -125,6 +153,7 @@ Expected strong sequence:
 The step reward shaping is deterministic and no longer uses naive linear normalization:
 
 - small positive rewards for correctly analyzing relevant logs
+- positive rewards for useful log queries, threat-intel lookups, ownership inspection, and accurate incident reports
 - larger rewards for correct alert correlation, mitigation, and justified escalation
 - penalties for incorrect or invalid actions
 - `-0.5` for blocking a legitimate IP
@@ -143,6 +172,8 @@ Programmatic graders score episodes in `[0.0, 1.0]` using:
 - false positive penalties
 
 The grader is deterministic, task-aware, and trajectory-aware. False positive blocks cap the score at `0.6`, and unresolved incidents are capped at `0.5`. See `security_incident_env/graders.py`.
+
+Strong case reports receive a small score bonus when they name the attacker, core evidence, correlated alert, containment action, and escalation requirement. Vague or wrong reports are penalized as low-quality analyst work.
 
 ## Local setup
 
@@ -268,8 +299,8 @@ Submit the public Space URL only after the local checks, `openenv push`, and the
 
 Using the deterministic heuristic policy against the default seed:
 
-- `easy`: `0.74`
-- `medium`: `0.72`
-- `hard`: `0.79`
+- `easy`: `0.851`
+- `medium`: `0.802`
+- `hard`: `0.935`
 
 Using random or overly aggressive blocking policies, scores drop quickly because false positives are penalized strongly and delayed containment reduces both reward and final score.

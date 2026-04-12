@@ -134,18 +134,24 @@ h2 {
 
 input,
 select,
+textarea,
 .button {
   width: 100%;
-  border-radius: 12px;
+  border-radius: 8px;
   border: 1px solid rgba(31, 41, 51, 0.14);
   font: inherit;
 }
 
 input,
-select {
+select,
+textarea {
   padding: 12px 14px;
   background: rgba(255, 255, 255, 0.92);
   color: var(--text);
+}
+
+textarea {
+  resize: vertical;
 }
 
 .button {

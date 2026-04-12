@@ -174,6 +174,51 @@ class EnvironmentDeterminismTests(unittest.TestCase):
         self.assertGreaterEqual(grade.final_reward, -1.0)
         self.assertLessEqual(grade.final_reward, 1.0)
 
+    def test_query_logs_can_reveal_hidden_attack_telemetry(self) -> None:
+        env = SecurityIncidentResponseEnv(seed=17)
+        observation = env.reset(TaskName.MEDIUM)
+        self.assertNotIn("L202", {log.log_id for log in observation.current_logs})
+
+        observation, reward, _, info = env.step(Action(action_type="query_logs", query="impact_signal"))
+
+        self.assertGreater(reward, 0.0)
+        self.assertIn("L202", {log.log_id for log in env.state().full_log_history})
+        self.assertIn("L202", info["feedback"])
+        self.assertTrue(observation.analyst_notes)
+
+    def test_threat_intel_and_incident_report_are_scored(self) -> None:
+        env = SecurityIncidentResponseEnv(seed=17)
+        env.reset(TaskName.HARD)
+        for action in [
+            Action(action_type="lookup_threat_intel", ip_address="203.0.113.200"),
+            Action(action_type="analyze_log", log_id="L300"),
+            Action(action_type="analyze_log", log_id="L302"),
+            Action(action_type="flag_alert", alert_id="A301"),
+            Action(
+                action_type="create_incident_report",
+                report="Attacker 203.0.113.200 used evidence L300 and L302. Alert A301 should be contained by block and escalated.",
+            ),
+        ]:
+            env.step(action)
+
+        grade = grade_episode(env.state(), use_llm_judge=False)
+        self.assertGreaterEqual(env.state().report_score, 0.75)
+        self.assertGreaterEqual(grade.report_quality, 0.75)
+        self.assertIn("203.0.113.200", env.state().intel_lookups)
+
+    def test_curriculum_records_weak_spots_after_failed_episode(self) -> None:
+        env = SecurityIncidentResponseEnv(seed=17)
+        observation = env.reset(TaskName.EASY)
+        benign_visible_ip = next(log.source_ip for log in observation.current_logs if log.source_ip not in env.state().malicious_ips)
+        env.step(Action(action_type="block_ip", ip_address=benign_visible_ip))
+        while not env.state().budget_exhausted and env.state().steps_taken < env.state().max_steps:
+            env.step(Action(action_type="ignore"))
+
+        snapshot = env._curriculum.snapshot(TaskName.EASY)
+
+        self.assertIn("false_positive_containment", snapshot["weak_spots"])
+        self.assertLess(snapshot["recent_success_rate"], 1.0)
+
     def test_adaptive_difficulty_increases_after_repeated_success(self) -> None:
         env = SecurityIncidentResponseEnv(seed=17)
         winning_actions = [

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import replace
+from pathlib import Path
 from typing import Dict, Tuple
 
 from .config import DEFAULT_CONFIG, DEFAULT_ENV_NAME, EnvironmentConfig
+from .curriculum import CurriculumController
 from .graders import grade_episode
 from .models import (
     Action,
@@ -31,9 +35,14 @@ STAGE_ORDER = {
 
 ACTION_COSTS = {
     ActionType.ANALYZE_LOG: 1,
+    ActionType.QUERY_LOGS: 1,
     ActionType.FLAG_ALERT: 1,
+    ActionType.INSPECT_USER: 1,
+    ActionType.LOOKUP_THREAT_INTEL: 1,
     ActionType.BLOCK_IP: 2,
+    ActionType.ISOLATE_HOST: 2,
     ActionType.ESCALATE: 2,
+    ActionType.CREATE_INCIDENT_REPORT: 1,
     ActionType.IGNORE: 0,
 }
 
@@ -57,8 +66,7 @@ class SecurityIncidentResponseEnv:
         self.env_name = env_name
         self._config = base_config
         self._episode_counter = 0
-        self._task_success_history: dict[TaskName, list[bool]] = {task_name: [] for task_name in TaskName}
-        self._task_mistake_history: dict[TaskName, list[int]] = {task_name: [] for task_name in TaskName}
+        self._curriculum = CurriculumController()
         self._scenario: ScenarioDefinition | None = None
         self._alerts_by_id: Dict[str, Alert] = {}
         self._state: State | None = None
@@ -71,6 +79,7 @@ class SecurityIncidentResponseEnv:
         episode_seed = effective_config.seed + (self._episode_counter * 97) + TASK_OFFSETS[task_name]
         self._episode_counter += 1
         scenario = build_scenario(task_name=task_name, seed=episode_seed, config=effective_config)
+        curriculum_snapshot = self._curriculum.snapshot(task_name)
         self._scenario = scenario
         self._episode_outcome_recorded = False
         self._alerts_by_id = {alert.alert_id: alert.model_copy(deep=True) for alert in scenario.alerts}
@@ -100,6 +109,7 @@ class SecurityIncidentResponseEnv:
             analyzed_log_ids=[],
             flagged_alert_ids=[],
             blocked_ips=[],
+            isolated_hosts=[],
             false_positive_blocks=[],
             escalation_sent=False,
             action_history=[],
@@ -128,12 +138,16 @@ class SecurityIncidentResponseEnv:
             required_block_ips=list(scenario.required_block_ips),
             requires_escalation=scenario.requires_escalation,
             resolved_step=None,
+            analyst_notes=[],
+            curriculum_level=int(curriculum_snapshot["level"]),
+            curriculum_profile=str(curriculum_snapshot["profile"]),
+            weak_spot_hints=list(curriculum_snapshot["weak_spots"]),
         )
         self._update_attack_stage()
         self._feedback = (
             f"Monitoring started for task '{task_name.value}'. "
             f"Only the most recent {effective_config.log_window} logs remain visible and the episode budget is "
-            f"{scenario.max_budget}. Adaptive difficulty level {self._adaptive_level(task_name)} is active."
+            f"{scenario.max_budget}. Curriculum profile {curriculum_snapshot['profile']} is active."
         )
         initial_observation = self._build_observation()
         self._state.observation_history.append(initial_observation.model_copy(deep=True))
@@ -169,12 +183,22 @@ class SecurityIncidentResponseEnv:
                 state.remaining_budget -= cost
                 if action.action_type == ActionType.ANALYZE_LOG:
                     raw_reward, feedback, invalid_action, meaningful_action = self._handle_analyze_log(action)
+                elif action.action_type == ActionType.QUERY_LOGS:
+                    raw_reward, feedback, invalid_action, meaningful_action = self._handle_query_logs(action)
                 elif action.action_type == ActionType.FLAG_ALERT:
                     raw_reward, feedback, invalid_action, meaningful_action = self._handle_flag_alert(action)
+                elif action.action_type == ActionType.INSPECT_USER:
+                    raw_reward, feedback, invalid_action, meaningful_action = self._handle_inspect_user(action)
+                elif action.action_type == ActionType.LOOKUP_THREAT_INTEL:
+                    raw_reward, feedback, invalid_action, meaningful_action = self._handle_lookup_threat_intel(action)
                 elif action.action_type == ActionType.BLOCK_IP:
                     raw_reward, feedback, invalid_action, meaningful_action = self._handle_block_ip(action)
+                elif action.action_type == ActionType.ISOLATE_HOST:
+                    raw_reward, feedback, invalid_action, meaningful_action = self._handle_isolate_host(action)
                 elif action.action_type == ActionType.ESCALATE:
                     raw_reward, feedback, invalid_action, meaningful_action = self._handle_escalate(action)
+                elif action.action_type == ActionType.CREATE_INCIDENT_REPORT:
+                    raw_reward, feedback, invalid_action, meaningful_action = self._handle_create_incident_report(action)
                 elif action.action_type == ActionType.IGNORE:
                     raw_reward, feedback, invalid_action, meaningful_action = self._handle_ignore()
 
@@ -214,6 +238,7 @@ class SecurityIncidentResponseEnv:
             programmatic_score=grade.programmatic_score,
             llm_judge_score=grade.llm_judge_score,
             final_reward=grade.final_reward,
+            report_score=grade.report_quality,
             feedback=feedback,
             score_cap=state.score_cap,
             judge_explanation=grade.judge_explanation,
@@ -221,7 +246,8 @@ class SecurityIncidentResponseEnv:
             judge_phase_quality=grade.judge_phase_quality,
         ).model_dump()
         if done and not self._episode_outcome_recorded:
-            self._record_episode_outcome(state)
+            self._record_episode_outcome(state, grade.score)
+            self._write_transcript(state, grade.model_dump(mode="json"))
             self._episode_outcome_recorded = True
         return observation, round(raw_reward, 4), done, info
 
@@ -256,6 +282,10 @@ class SecurityIncidentResponseEnv:
             visible_history_count=len(state.full_log_history),
             log_window_size=state.window_size,
             context_truncated=len(state.full_log_history) > state.window_size,
+            analyst_notes=list(state.analyst_notes[-5:]),
+            curriculum_level=state.curriculum_level,
+            curriculum_profile=state.curriculum_profile,
+            weak_spot_hints=list(state.weak_spot_hints),
         )
 
     def _handle_analyze_log(self, action: Action) -> tuple[float, str, bool, bool]:
@@ -310,6 +340,51 @@ class SecurityIncidentResponseEnv:
 
         return self._useless_penalty(-0.05), f"Log {action.log_id} appears benign and did not advance the investigation.", False, False
 
+    def _handle_query_logs(self, action: Action) -> tuple[float, str, bool, bool]:
+        state = self._require_state()
+        query = (action.query or "").strip().lower()
+        if not query:
+            state.invalid_action_count += 1
+            return -0.25, "query_logs requires a query string.", True, False
+        if query in state.queried_terms:
+            state.redundant_action_count += 1
+            return self._useless_penalty(-0.1), f"Query {query!r} was already run.", False, False
+
+        state.queried_terms.append(query)
+        search_space = [*state.full_log_history, *state.remaining_log_queue]
+        matches = [log for log in search_space if self._log_matches_query(log, query)]
+        if not matches:
+            state.analyst_notes.append(f"query:{query}:no_matches")
+            return self._useless_penalty(-0.04), f"Query {query!r} returned no matching telemetry.", False, False
+
+        revealed_ids = {log.log_id for log in state.full_log_history}
+        newly_revealed = []
+        for log in matches:
+            if log.log_id in revealed_ids:
+                continue
+            state.remaining_log_queue = [item for item in state.remaining_log_queue if item.log_id != log.log_id]
+            state.full_log_history.append(log)
+            newly_revealed.append(log.log_id)
+            if len(newly_revealed) >= self._config.reveal_per_step + 1:
+                break
+        state.full_log_history.sort(key=lambda item: item.timestamp)
+
+        malicious_hits = sorted({log.log_id for log in matches if log.log_id in state.malicious_log_ids})
+        decoy_hits = sorted({log.log_id for log in matches if log.log_id in state.decoy_log_ids})
+        state.analyst_notes.append(f"query:{query}:matches={','.join(log.log_id for log in matches[:4])}")
+        if malicious_hits:
+            return (
+                self._scale_positive_reward(0.16 if newly_revealed else 0.08),
+                f"Query {query!r} found attack telemetry {', '.join(malicious_hits)}"
+                + (f" and revealed {', '.join(newly_revealed)}." if newly_revealed else "."),
+                False,
+                True,
+            )
+        if decoy_hits:
+            state.timeliness_penalty = round(min(0.7, state.timeliness_penalty + 0.03), 4)
+            return self._useless_penalty(-0.06), f"Query {query!r} mostly matched decoy telemetry {', '.join(decoy_hits)}.", False, False
+        return self._scale_positive_reward(0.03), f"Query {query!r} found benign context but no attack evidence.", False, True
+
     def _handle_flag_alert(self, action: Action) -> tuple[float, str, bool, bool]:
         state = self._require_state()
         if not action.alert_id:
@@ -338,6 +413,53 @@ class SecurityIncidentResponseEnv:
             return self._useless_penalty(-0.2), f"Alert {action.alert_id} is misleading and consumed analyst attention.", False, False
 
         return self._useless_penalty(-0.15), f"Alert {action.alert_id} does not correspond to the real incident driver.", False, False
+
+    def _handle_inspect_user(self, action: Action) -> tuple[float, str, bool, bool]:
+        state = self._require_state()
+        subject = (action.user_id or action.ip_address or "").strip()
+        if not subject:
+            state.invalid_action_count += 1
+            return -0.25, "inspect_user requires user_id or ip_address.", True, False
+        if subject in state.inspected_users:
+            state.redundant_action_count += 1
+            return self._useless_penalty(-0.08), f"{subject} was already inspected.", False, False
+
+        state.inspected_users.append(subject)
+        known_ips = self._known_ips()
+        if subject not in known_ips and not subject.startswith(("user:", "svc:", "host:")):
+            state.invalid_action_count += 1
+            return -0.2, f"{subject} has not appeared in the case context.", True, False
+        if subject in state.malicious_ips:
+            state.analyst_notes.append(f"identity:{subject}:no_approved_owner")
+            return self._scale_positive_reward(0.1), f"{subject} has no approved owner record and matches the active attack path.", False, True
+        if subject in state.decoy_ips:
+            state.analyst_notes.append(f"identity:{subject}:approved_change")
+            return self._useless_penalty(-0.03), f"{subject} maps to an approved vendor or change ticket and should not be contained.", False, True
+        state.analyst_notes.append(f"identity:{subject}:benign_owner")
+        return self._scale_positive_reward(0.03), f"{subject} maps to a managed user or service with benign activity.", False, True
+
+    def _handle_lookup_threat_intel(self, action: Action) -> tuple[float, str, bool, bool]:
+        state = self._require_state()
+        ip_address = (action.ip_address or "").strip()
+        if not ip_address:
+            state.invalid_action_count += 1
+            return -0.25, "lookup_threat_intel requires ip_address.", True, False
+        if ip_address in state.intel_lookups:
+            state.redundant_action_count += 1
+            return self._useless_penalty(-0.08), f"Threat intel for {ip_address} was already checked.", False, False
+        if ip_address not in self._known_ips():
+            state.invalid_action_count += 1
+            return -0.2, f"IP {ip_address} has not appeared in the case context.", True, False
+
+        state.intel_lookups.append(ip_address)
+        if ip_address in state.malicious_ips:
+            state.analyst_notes.append(f"intel:{ip_address}:malicious")
+            return self._scale_positive_reward(0.12), f"Threat intel links {ip_address} to recent abuse infrastructure.", False, True
+        if ip_address in state.decoy_ips:
+            state.analyst_notes.append(f"intel:{ip_address}:approved_vendor")
+            return self._scale_positive_reward(0.04), f"Threat intel marks {ip_address} as an approved validation or vendor range.", False, True
+        state.analyst_notes.append(f"intel:{ip_address}:no_hits")
+        return self._scale_positive_reward(0.02), f"Threat intel has no hostile finding for {ip_address}.", False, True
 
     def _handle_block_ip(self, action: Action) -> tuple[float, str, bool, bool]:
         state = self._require_state()
@@ -373,6 +495,21 @@ class SecurityIncidentResponseEnv:
 
         return self._scale_positive_reward(0.08), f"IP {action.ip_address} is suspicious, but not the primary containment target.", False, True
 
+    def _handle_isolate_host(self, action: Action) -> tuple[float, str, bool, bool]:
+        state = self._require_state()
+        if not action.ip_address:
+            state.invalid_action_count += 1
+            return -0.25, "isolate_host requires ip_address.", True, False
+        if action.ip_address in state.isolated_hosts:
+            state.redundant_action_count += 1
+            return self._useless_penalty(-0.12), f"Host {action.ip_address} is already isolated.", False, False
+        reward, feedback, invalid_action, meaningful_action = self._handle_block_ip(Action(action_type=ActionType.BLOCK_IP, ip_address=action.ip_address))
+        if not invalid_action:
+            state.isolated_hosts.append(action.ip_address)
+        if invalid_action:
+            return reward, feedback.replace("block_ip", "isolate_host"), invalid_action, meaningful_action
+        return reward, feedback.replace("IP", "Host").replace("blocked", "isolated"), invalid_action, meaningful_action
+
     def _handle_escalate(self, action: Action) -> tuple[float, str, bool, bool]:
         state = self._require_state()
         if state.escalation_sent:
@@ -395,6 +532,26 @@ class SecurityIncidentResponseEnv:
 
         state.escalation_sent = True
         return self._scale_positive_reward(0.38), "Escalation captured a substantiated, mitigated incident and ended the response cleanly.", False, True
+
+    def _handle_create_incident_report(self, action: Action) -> tuple[float, str, bool, bool]:
+        state = self._require_state()
+        report = " ".join((action.report or "").split())
+        if not report:
+            state.invalid_action_count += 1
+            return -0.25, "create_incident_report requires report text.", True, False
+        if state.report_submitted:
+            state.redundant_action_count += 1
+            return self._useless_penalty(-0.1), "Incident report was already submitted.", False, False
+
+        state.report_submitted = True
+        state.incident_report = report[:1200]
+        state.report_score = self._score_incident_report(report)
+        if state.report_score >= 0.75:
+            return self._scale_positive_reward(0.16), "Incident report accurately captured attacker, evidence, alert, and containment.", False, True
+        if state.report_score >= 0.45:
+            return self._scale_positive_reward(0.06), "Incident report captured partial case context but missed important evidence.", False, True
+        state.timeliness_penalty = round(min(0.7, state.timeliness_penalty + 0.04), 4)
+        return self._useless_penalty(-0.08), "Incident report was too vague or pointed at the wrong case facts.", False, False
 
     def _handle_ignore(self) -> tuple[float, str, bool, bool]:
         state = self._require_state()
@@ -538,6 +695,40 @@ class SecurityIncidentResponseEnv:
             return partners[0]
         return ", ".join(partners[:-1]) + f" and {partners[-1]}"
 
+    def _known_ips(self) -> set[str]:
+        state = self._require_state()
+        known_ips = {log.source_ip for log in state.full_log_history}
+        known_ips.update(log.source_ip for log in state.remaining_log_queue)
+        known_ips.update(alert.source_ip for alert in self._visible_alerts() if alert.source_ip)
+        return known_ips
+
+    def _log_matches_query(self, log, query: str) -> bool:
+        terms = [term for term in query.replace(",", " ").split() if term]
+        if not terms:
+            return False
+        haystack = f"{log.log_id} {log.source_ip} {log.event_type} {log.severity.value} {log.message}".lower()
+        return all(term in haystack for term in terms)
+
+    def _score_incident_report(self, report: str) -> float:
+        state = self._require_state()
+        text = report.lower()
+        score = 0.0
+        if any(ip.lower() in text for ip in state.required_block_ips):
+            score += 0.3
+        if any(alert_id.lower() in text for alert_id in state.required_alert_ids):
+            score += 0.2
+        covered_logs = sum(1 for log_id in state.required_analysis_log_ids if log_id.lower() in text)
+        score += 0.25 * (covered_logs / max(1, len(state.required_analysis_log_ids)))
+        if "contain" in text or "block" in text or "isolat" in text:
+            score += 0.15
+        if state.requires_escalation and ("escalat" in text or "severity" in text):
+            score += 0.1
+        elif not state.requires_escalation:
+            score += 0.05
+        if any(ip.lower() in text for ip in state.decoy_ips):
+            score -= 0.2
+        return round(max(0.0, min(1.0, score)), 4)
+
     def _log_stage(self, log_id: str) -> AttackStage:
         state = self._require_state()
         return state.log_stage_map.get(log_id, AttackStage.NONE)
@@ -553,36 +744,41 @@ class SecurityIncidentResponseEnv:
         return self._scenario
 
     def _adaptive_level(self, task_name: TaskName) -> int:
-        history = self._task_success_history[task_name][-4:]
-        if len(history) < 2:
-            return 0
-        success_rate = sum(1 for item in history if item) / len(history)
-        if success_rate >= 0.9:
-            return 2
-        if success_rate >= 0.75:
-            return 1
-        return 0
+        return self._curriculum.profile_for(task_name).level
 
     def _effective_config(self, task_name: TaskName) -> EnvironmentConfig:
-        level = self._adaptive_level(task_name)
-        if level == 0:
-            return self._config
+        return self._curriculum.effective_config(task_name, self._config)
 
-        return replace(
-            self._config,
-            num_decoys=min(3, self._config.num_decoys + level),
-            observation_window_size=max(3, self._config.observation_window_size - level),
-            initial_visible_logs=max(3, min(self._config.initial_visible_logs, self._config.observation_window_size - level)),
-        )
+    def _record_episode_outcome(self, state: State, score: float) -> None:
+        self._curriculum.record(state, score)
 
-    def _record_episode_outcome(self, state: State) -> None:
-        history = self._task_success_history[state.task_name]
-        history.append(state.incident_resolved and not state.false_positive_blocks)
-        if len(history) > 6:
-            del history[0]
-
-        mistakes = state.invalid_action_count + state.redundant_action_count + state.useless_step_count + len(state.false_positive_blocks)
-        mistake_history = self._task_mistake_history[state.task_name]
-        mistake_history.append(mistakes)
-        if len(mistake_history) > 6:
-            del mistake_history[0]
+    def _write_transcript(self, state: State, grade: dict[str, object]) -> None:
+        transcript_flag = os.getenv("OPENENV_WRITE_TRANSCRIPTS", "1").strip().lower()
+        if transcript_flag in {"0", "false", "no"}:
+            return
+        transcript_path = Path(os.getenv("OPENENV_TRANSCRIPT_PATH", "outputs/episode_transcripts.jsonl"))
+        if not transcript_path.is_absolute():
+            transcript_path = Path.cwd() / transcript_path
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "env_name": state.env_name,
+            "task_name": state.task_name.value,
+            "scenario_seed": state.scenario_seed,
+            "attack_path": state.attack_path,
+            "curriculum": {
+                "level": state.curriculum_level,
+                "profile": state.curriculum_profile,
+                "weak_spot_hints": state.weak_spot_hints,
+            },
+            "actions": [action.model_dump(mode="json") for action in state.action_history],
+            "rewards": state.reward_history,
+            "feedback": state.feedback_history,
+            "resolved": state.incident_resolved,
+            "false_positive_blocks": state.false_positive_blocks,
+            "blocked_ips": state.blocked_ips,
+            "isolated_hosts": state.isolated_hosts,
+            "report_score": state.report_score,
+            "grade": grade,
+        }
+        with transcript_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")

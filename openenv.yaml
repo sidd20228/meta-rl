@@ -49,9 +49,14 @@ action_schema:
       type: string
       enum:
         - analyze_log
+        - query_logs
         - flag_alert
+        - inspect_user
+        - lookup_threat_intel
         - block_ip
+        - isolate_host
         - escalate
+        - create_incident_report
         - ignore
     log_id:
       type: string
@@ -60,6 +65,15 @@ action_schema:
       type: string
       nullable: true
     alert_id:
+      type: string
+      nullable: true
+    query:
+      type: string
+      nullable: true
+    user_id:
+      type: string
+      nullable: true
+    report:
       type: string
       nullable: true
 
@@ -99,6 +113,18 @@ observation_schema:
       type: integer
     context_truncated:
       type: boolean
+    analyst_notes:
+      type: array
+      items:
+        type: string
+    curriculum_level:
+      type: integer
+    curriculum_profile:
+      type: string
+    weak_spot_hints:
+      type: array
+      items:
+        type: string
 
 state_schema:
   type: object
@@ -117,6 +143,12 @@ state_schema:
       type: boolean
     false_positive_blocks:
       type: array
+    isolated_hosts:
+      type: array
+    report_submitted:
+      type: boolean
+    report_score:
+      type: number
     decoy_ips:
       type: array
     max_budget:

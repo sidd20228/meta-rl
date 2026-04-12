@@ -20,6 +20,8 @@ const els = {
   logId: document.getElementById("log-id"),
   alertId: document.getElementById("alert-id"),
   ipAddress: document.getElementById("ip-address"),
+  query: document.getElementById("query"),
+  report: document.getElementById("report"),
   sessionStatus: document.getElementById("session-status"),
   sessionMeta: document.getElementById("session-meta"),
   windowMeta: document.getElementById("window-meta"),
@@ -136,6 +138,8 @@ function buildActionPayload() {
     log_id: normalizeValue(els.logId.value),
     alert_id: normalizeValue(els.alertId.value),
     ip_address: normalizeValue(els.ipAddress.value),
+    query: normalizeValue(els.query.value),
+    report: normalizeValue(els.report.value),
   };
 }
 
@@ -149,6 +153,7 @@ function renderObservation(observation, payload) {
   els.doneMeta.textContent = String(Boolean(payload.done));
   els.scoreMeta.textContent = payload.info.score == null ? "-" : Number(payload.info.score).toFixed(2);
   showFeedback(payload.info.feedback || observation.previous_action_feedback, false);
+  renderAnalystNotes(observation, payload.info.feedback || observation.previous_action_feedback);
   renderJudge(payload.info);
   updateSessionMeta();
 
@@ -200,6 +205,14 @@ function renderAlerts(alerts) {
       `
     )
     .join("");
+}
+
+function renderAnalystNotes(observation, feedback) {
+  const notes = observation.analyst_notes || [];
+  if (!notes.length) {
+    return;
+  }
+  showFeedback(`${feedback} Notes: ${notes.slice(-3).join(" | ")}`, false);
 }
 
 function renderHistory() {
@@ -277,6 +290,8 @@ function clearInputs() {
   els.logId.value = "";
   els.alertId.value = "";
   els.ipAddress.value = "";
+  els.query.value = "";
+  els.report.value = "";
 }
 
 function renderEmptyState() {
